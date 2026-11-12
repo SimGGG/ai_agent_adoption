@@ -20,7 +20,7 @@
 - 기준값은 `experiments/config.yaml`에만 둔다. 모듈과 스크립트에 기준값을 직접 적지 않는다.
 - 시험과 가상 자료에서 나온 수치는 연구 결과로 적지 않는다. `docs/s0-data-audit.md`에는 실제 자료로 실행한 수치만 들어간다.
 - Python은 3.12, 가상환경은 conda 가상환경 `aabundle`을 쓴다(저자 결정, 설계 문서 결정 21). uv는 쓰지 않는다. 패키지는 `environment.yml`에 적어 conda-forge에서 설치하고, 설치된 버전은 `environment.lock.yml`에 남긴다. 가상환경은 conda의 기본 위치(`anaconda3\envs\aabundle`)에 생기므로 구글 드라이브 밖에 있다. 다른 conda 가상환경과 `base`는 건드리지 않는다.
-- 모든 파이썬 명령은 저장소 최상위 폴더에서 `./tools/py.ps1`로 실행한다(과제 1에서 만든다). 이 스크립트는 `conda run -n aabundle --no-capture-output python -X utf8` 뒤에 받은 인자를 붙여 실행한다. 예: `./tools/py.ps1 -m pytest -q`. PowerShell이 스크립트 실행을 막거나 Bash에서 실행할 때는 `conda run -n aabundle --no-capture-output python -X utf8 -m pytest -q`처럼 풀어서 쓴다.
+- 모든 파이썬 명령은 저장소 최상위 폴더에서 `./tools/py.ps1`로 실행한다(과제 1에서 만든다). 이 스크립트는 `conda run -n aabundle --no-capture-output python -X utf8` 뒤에 받은 인자를 붙여 실행한다. 예: `./tools/py.ps1 -m pytest -q`. Git Bash에서는 `conda run`이 가상환경이 아닌 다른 파이썬을 부르므로(과제 1에서 확인) 가상환경의 파이썬을 직접 부른다: `PYTHONNOUSERSITE=1 PYTHONUTF8=1 "$(conda info --base)/envs/aabundle/python.exe" -X utf8 -m pytest -q`. `tools/py.ps1`은 사용자 폴더에 따로 설치된 패키지가 가상환경의 패키지를 가리지 않도록 `PYTHONNOUSERSITE=1`도 설정한다.
 - 작업은 이 저장소 폴더에서 `infra-1` 브랜치로 한다. 별도 작업 폴더(git worktree)는 만들지 않는다. `data/`가 git 밖에 있어 다른 폴더에서는 원자료를 읽을 수 없다.
 - 과제가 끝날 때마다 커밋한다. `data/`, `experiments/outputs/`, `test.ipynb`는 커밋하지 않는다. 커밋 메시지는 한국어로 쓰고 끝에 `Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>`를 붙인다.
 - 사용자에게 보이는 한국어 문서(`README.md`, `CLAUDE.md`, 보고서, 주석)는 사용자의 용어 원칙을 따른다: 영어 개념을 줄여 새 용어를 만들지 않는다. 은유를 쓰지 않는다. 개념은 기능을 풀어서 적는다. 표준 학술 용어는 처음 나올 때 한 문장으로 정의한다.
