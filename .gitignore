@@ -1,0 +1,29 @@
+# 원자료와 대용량 산출물
+data/
+experiments/outputs/
+
+# 인증키·비밀값
+.env
+.env.*
+
+# 파이썬
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+
+# LaTeX 조판 부산물
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.toc
+*.xdv
+
+# 도구 임시 폴더
+.superpowers/
