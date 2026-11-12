@@ -157,11 +157,43 @@ def _write_keco(path: Path) -> None:
     wb.save(path)
 
 
+# KED 가상 파일: 사업자번호 1000000002는 옛 행과 새 행이 있고, 새 행(정보일자 20230501)의 값이 남아야 한다.
+KED_SIZE_LATEST = "L2"
+KED_SIZE_OLD = "S1"
+
+
+def _ked_row(bzno, estab, info_date, size="M1", ipo="N", venture="Y", extra_at=None) -> bytes:
+    """48개 항목을 `|`로 이은 한 줄을 CP949 바이트로 돌려준다. 18번 항목은 항상 `SECRET18`이다.
+
+    `extra_at`을 주면 그 번호의 항목 안에 `|`를 하나 더 넣어 구분자가 48개가 되게 한다.
+    """
+    f = [f"항목{i:02d}" if i % 2 else f"v{i:02d}" for i in range(48)]
+    f[5], f[12], f[18], f[19] = size, venture, "SECRET18", estab
+    f[20], f[31], f[32] = ipo, info_date, bzno
+    if extra_at is not None:
+        f[extra_at] = f[extra_at] + "|추가"
+    return ("|".join(f) + "\r\n").encode("cp949")
+
+
+def _write_ked(path: Path) -> None:
+    rows = [
+        _ked_row("1000000001", "20100315", "20230501"),
+        _ked_row("1000000002", "19991201", "20230501", size=KED_SIZE_LATEST),
+        _ked_row("1000000002", "19991201", "20220101", size=KED_SIZE_OLD),
+        _ked_row("1000000003", "", "20230501", size="", ipo="", venture=""),
+        _ked_row("12345", "20000101", "20230501"),
+        _ked_row("1000000005", "20150101", "20230501", extra_at=5),
+        _ked_row("1000000006", "SECRET18", "20230501"),
+        _ked_row("1000000008", "20120101", "20230501", extra_at=40),
+    ]
+    path.write_bytes(b"".join(rows))
+
+
 def write_all(root: Path) -> dict:
     """`root` 아래에 가상 자료 한 벌을 쓰고 경로와 설정을 담은 사전을 돌려준다.
 
     폴더 배치는 실제와 같다(`root/data/postings/…`, `root/data/ked/…`).
-    KED 파일은 경로만 정하고 파일은 만들지 않는다.
+    KED 파일은 8행짜리 가상 파일로 쓴다(CP949, 18번 항목은 모두 `SECRET18`).
     """
     root = Path(root)
     postings_dir = root / "data" / "postings"
@@ -176,6 +208,7 @@ def write_all(root: Path) -> dict:
     _write_codebook(codebook)
     _write_ksic(ksic)
     _write_keco(keco)
+    _write_ked(ked_dir / "KED5002.txt")
 
     cfg = paths.load_config()
     cfg["data"]["years"] = [2025]
