@@ -87,6 +87,7 @@ def build_posting_base(raw: pd.DataFrame, ked_firm: pd.DataFrame, ksic_valid: se
     left = pd.DataFrame({"_key": bzno})
     right = ked_firm[["bzno", *_KED_COLUMNS]].copy()
     right["bzno"] = right["bzno"].astype("string")
+    right = right[right["bzno"].notna()]  # 사업자번호가 없는 KED 행은 어떤 공고와도 결합하지 않는다
     merged = left.merge(right, how="left", left_on="_key", right_on="bzno", indicator=True)
     if len(merged) != n:
         raise RuntimeError(f"KED 결합 뒤 행 수가 달라졌습니다: 결합 전 {n}, 결합 뒤 {len(merged)}")

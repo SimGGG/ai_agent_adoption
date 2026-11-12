@@ -50,3 +50,16 @@ def test_period_filter(synth_data):
     raw = pd.concat(rawio.iter_postings(synth_data["postings_dir"], 2025, sample.RAW_COLUMNS))
     b = sample.build_posting_base(raw, ked.extract_ked_firm(synth_data["ked_firm"]), set(), cfg)
     assert (~b.in_period).sum() == 4                     # p01~p04
+
+def test_missing_bzno_never_joins(synth_data):
+    raw = pd.concat(rawio.iter_postings(synth_data["postings_dir"], 2025, sample.RAW_COLUMNS))
+    k = ked.extract_ked_firm(synth_data["ked_firm"])
+    bad = pd.DataFrame({"bzno": pd.array([None], dtype="string"), "ked_estab_year": pd.array([2000], dtype="Int16"),
+                        "ked_size": pd.array(["BAD"], dtype="string"), "ked_ipo": pd.array(["Y"], dtype="string"),
+                        "ked_venture": pd.array(["Y"], dtype="string")})
+    b = sample.build_posting_base(raw, pd.concat([k, bad], ignore_index=True), set(), synth_data["cfg"]).set_index("posting_id")
+    assert len(b) == 12
+    assert not b.loc["p04", "ked_matched"]
+    assert pd.isna(b.loc["p04", "ked_size"]) and pd.isna(b.loc["p04", "firm_age"])
+    assert b.loc["p01", "ked_matched"] and b.loc["p01", "firm_age"] == 15
+    assert not (b["ked_size"] == "BAD").any()
