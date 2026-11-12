@@ -61,6 +61,24 @@ def test_allowed_edge_values_pass():
         validate.validate_config(_set(cfg, key, value))
 
 
+# 재검토 뒤 더한 시험. 표현은 `|`로 이어 붙여 쓰므로(`treatment.flag_treatment`), 하나씩은 읽히지만 이어 붙이면
+# 읽히지 않는 표현도 막는다. 이 파이썬(3.12)에서는 `(?i)` 같은 전체 적용 표시가 이어 붙인 식의 맨 앞이 아니면 오류이다.
+@pytest.mark.parametrize("key, value", [
+    ("treatment.keywords.strict", ["AI\\s*agent", "(?i)llm"]),
+    ("treatment.keywords.broad_extra", ["Claude", "(?i)llm"]),
+    ("treatment.keywords.broad_extra", ["(?i)llm"]),          # 넓은 사전은 엄격한 사전 뒤에 이어 붙인다
+    ("treatment.keywords.exclude", ["에이전시", "(?i)보험\\s*에이전트"]),
+])
+def test_patterns_are_also_checked_joined(key, value):
+    with pytest.raises(ValueError, match=key.replace(".", r"\.")) as e:
+        validate.validate_config(_set(paths.load_config(), key, value))
+    assert "이어 붙인" in str(e.value)
+
+
+def test_inline_flag_at_the_start_of_a_joined_list_passes():
+    validate.validate_config(_set(paths.load_config(), "treatment.keywords.strict", ["(?i)llm", "AI\\s*agent"]))
+
+
 def test_missing_key_is_named():
     cfg = paths.load_config()
     del cfg["estimation"]["n_folds"]

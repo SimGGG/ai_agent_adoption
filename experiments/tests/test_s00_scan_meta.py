@@ -162,3 +162,26 @@ def test_rename_gives_up_and_cleans_up(synth_data, tmp_path, monkeypatch):
         s00.scan(synth_data["cfg"], synth_data["root"], out_dir)
     assert list(tries.values()) == [s00.RENAME_ATTEMPTS]   # 첫 파일에서 멈춘다
     assert sorted(p.name for p in out_dir.iterdir()) == []
+
+
+def test_meta_keeps_git_values_from_the_start_of_the_scan(synth_data, tmp_path, monkeypatch):
+    # 재검토 뒤 더한 시험. 훑는 도중에 커밋이 생겨도 기록에는 실행을 시작할 때의 코드 시점이 남아야 한다.
+    # 처치 판별이 처음 불린 뒤(훑는 도중)에는 git이 다른 커밋과 변경 여부를 돌려주게 한다.
+    s00 = load_script()
+    state = {"scanning": False, "calls": 0}
+    real_build_treat = s00.treatment.build_treat
+
+    def build_treat(*args, **kwargs):
+        state["scanning"] = True
+        return real_build_treat(*args, **kwargs)
+
+    def git_commit():
+        state["calls"] += 1
+        return "latercommit" if state["scanning"] else "firstcommit"
+    monkeypatch.setattr(s00.treatment, "build_treat", build_treat)
+    monkeypatch.setattr(s00, "_git_commit", git_commit)
+    monkeypatch.setattr(s00, "_git_uncommitted_changes", lambda: state["scanning"])
+    out = s00.scan(synth_data["cfg"], synth_data["root"], tmp_path / "s0")
+    meta = json.loads(out["scan_meta"].read_text(encoding="utf-8"))
+    assert state["scanning"] and state["calls"] == 1
+    assert meta["git_commit"] == "firstcommit" and meta["git_uncommitted_changes"] is False

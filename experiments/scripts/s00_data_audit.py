@@ -224,8 +224,8 @@ def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
     `post_start_missing`은 공고 파일의 모든 공고를 파일 연도 × 수집 사이트별로 세어 게시일이 없는 공고 수를
     적은 표이고, `sido_other_words`는 `base`에 들어간 공고 가운데 시도가 `기타`인 공고의 근무지 첫 낱말
     (`sample.region_first_word`, 20자까지)별 공고 수를 많은 순으로 200개까지 적은 표이다. 근무지 열 자체는
-    `base`에 쓰지 않는다. `scan_meta.json`에는 실행을 시작하고 끝낸 시각, git 커밋, git에 기록된 파일에 커밋하지
-    않은 변경이 있었는지, 설정 가운데 `SCAN_CONFIG_KEYS` 항목의 값만 적는다(공고 단위 값은 적지 않는다).
+    `base`에 쓰지 않는다. `scan_meta.json`에는 실행을 시작하고 끝낸 시각, 실행을 시작할 때의 git 커밋과 git에 기록된
+    파일에 커밋하지 않은 변경이 있었는지, 설정 가운데 `SCAN_CONFIG_KEYS` 항목의 값만 적는다(공고 단위 값은 적지 않는다).
 
     설정을 확인하고(`validate.validate_config`) 입력을 확인한 뒤 훑기 전에, `out_dir`에 있는 이 함수의 결과 파일
     아홉 개와 그 `.part` 파일을 지운다(폴더의 다른 파일은 건드리지 않는다). 각 파일은 먼저 `.part`가 붙은
@@ -234,7 +234,9 @@ def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
     예외를 다시 낸다. 그래서 `out_dir`에 남은 결과 파일은 끝까지 처리된 한 번의 실행에서 나온 것뿐이다.
     """
     validate.validate_config(cfg)
+    # 결과를 만드는 코드는 실행을 시작할 때 읽혔으므로, 코드 시점도 시작할 때 한 번 적는다(훑는 도중에 커밋이 생길 수 있다)
     started = _now_iso()
+    git_commit, git_changed = _git_commit(), _git_uncommitted_changes()
     root, out_dir = Path(root), Path(out_dir)
     years = [int(y) for y in cfg["data"]["years"]]
     postings_dir = root / "data" / "postings"
@@ -390,8 +392,8 @@ def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
             with rawio.parquet_writer(parts[name], schema) as w:
                 w.write_table(_to_table(df, schema))
 
-        meta = {"scan_started": started, "scan_finished": _now_iso(), "git_commit": _git_commit(),
-                "git_uncommitted_changes": _git_uncommitted_changes(), "config": _scan_config(cfg)}
+        meta = {"scan_started": started, "scan_finished": _now_iso(), "git_commit": git_commit,
+                "git_uncommitted_changes": git_changed, "config": _scan_config(cfg)}
         # 같은 폴더의 parquet 파일을 쓸 때 `data` 폴더 아래가 아닌지 이미 확인했다
         parts[META_NAME].write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 

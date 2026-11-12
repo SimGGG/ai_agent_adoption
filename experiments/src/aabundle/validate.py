@@ -47,14 +47,16 @@ def _as_date(v):
     return None
 
 
-def _check_patterns(cfg: dict, key: str, required: bool, problems: list[str]) -> None:
+def _check_patterns(cfg: dict, key: str, required: bool, problems: list[str]) -> bool:
+    """표현을 하나씩 확인한다. 문제가 없으면 True를 돌려준다."""
+    n_before = len(problems)
     patterns = _get(cfg, key)
     if patterns is _MISSING:
         problems.append(f"`{key}` 항목이 없습니다")
-        return
+        return False
     if not isinstance(patterns, list):
         problems.append(f"`{key}`는 목록이어야 합니다")
-        return
+        return False
     if required and not patterns:
         problems.append(f"`{key}`가 비어 있습니다. 비어 있으면 처치 공고를 정할 수 없습니다")
     for i, p in enumerate(patterns):
@@ -66,6 +68,25 @@ def _check_patterns(cfg: dict, key: str, required: bool, problems: list[str]) ->
             re.compile(p, re.IGNORECASE)
         except re.error as e:
             problems.append(f"`{key}`의 {i + 1}번째 표현 {p!r}를 정규표현식으로 읽을 수 없습니다: {e}")
+    return len(problems) == n_before
+
+
+def _check_joined(patterns: list[str], key: str, what: str, problems: list[str]) -> bool:
+    """처치 판별에서처럼 표현들을 `|`로 이어 붙인 식을 확인한다(`treatment.flag_treatment`, `pattern_counts`).
+    문제가 없으면 True를 돌려준다.
+
+    하나씩은 읽히지만 이어 붙이면 읽히지 않는 표현이 있기 때문이다. 예: `(?i)` 같은 전체 적용 표시는 식의 맨 앞이
+    아니면 오류이다.
+    """
+    if not patterns:
+        return True
+    try:
+        re.compile("|".join(patterns), re.IGNORECASE)
+    except re.error as e:
+        problems.append(f"`{key}`의 표현을 {what} `|`로 이어 붙인 식을 정규표현식으로 읽을 수 없습니다: {e}. "
+                        "처치 판별에서는 표현을 이어 붙여 쓰므로, 표현 가운데에 `(?i)` 같은 표시를 두지 않아야 합니다")
+        return False
+    return True
 
 
 def validate_config(cfg: dict) -> None:
@@ -109,9 +130,16 @@ def validate_config(cfg: dict) -> None:
     if unit is not _MISSING and unit not in PERIOD_UNITS:
         problems.append(f"`period.unit`은 {PERIOD_UNITS} 가운데 하나여야 합니다: {unit!r}")
 
-    _check_patterns(cfg, "treatment.keywords.strict", True, problems)
-    _check_patterns(cfg, "treatment.keywords.broad_extra", False, problems)
-    _check_patterns(cfg, "treatment.keywords.exclude", False, problems)
+    strict_ok = _check_patterns(cfg, "treatment.keywords.strict", True, problems)
+    extra_ok = _check_patterns(cfg, "treatment.keywords.broad_extra", False, problems)
+    exclude_ok = _check_patterns(cfg, "treatment.keywords.exclude", False, problems)
+    # 하나씩 확인해 문제가 없는 목록만, 코드가 쓰는 대로 이어 붙여 다시 확인한다(`treatment.keyword_lists`)
+    strict = _get(cfg, "treatment.keywords.strict")
+    if strict_ok and _check_joined(strict, "treatment.keywords.strict", "모두", problems) and extra_ok:
+        _check_joined(strict + _get(cfg, "treatment.keywords.broad_extra"), "treatment.keywords.broad_extra",
+                      "엄격한 사전(`treatment.keywords.strict`) 뒤에", problems)
+    if exclude_ok:
+        _check_joined(_get(cfg, "treatment.keywords.exclude"), "treatment.keywords.exclude", "모두", problems)
 
     kd = need("treatment.keyword_dictionary")
     if kd is not _MISSING and kd not in KEYWORD_DICTIONARIES:

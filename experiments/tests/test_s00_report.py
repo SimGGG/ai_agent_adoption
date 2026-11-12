@@ -221,7 +221,7 @@ def test_report_wording(synth_data, tmp_path):
 
 def test_postings_with_only_agent_skill_codes(synth_data, tmp_path):
     # 네 단계를 통과한 공고 p01 p02 p03 p05 p09 p11 p12 가운데 p05는 숙련이 AI 에이전트 숙련코드(IT-05-0413,
-    # IT-05-0410)뿐이어서, 54개 코드를 빼면 결과 숙련이 하나도 없다.
+    # IT-05-0410)뿐이어서, 54개 코드를 빼면 결과변수로 쓰는 숙련이 하나도 없다.
     s00, t = run(synth_data, tmp_path)
     e = t["t03e_no_outcome_skill"]
     assert list(e.columns) == ["group", "n", "n_no_outcome_skill", "no_outcome_skill_rate"]
