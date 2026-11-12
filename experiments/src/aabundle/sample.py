@@ -37,18 +37,36 @@ def _build_sido_table() -> dict:
 
 
 _SIDO = _build_sido_table()
+# 전남과 광주를 합친 통합특별시. 광주, 전남과 합칠지 저자가 정할 수 있도록 따로 둔다(설계 문서 6.7절 16번).
+_SIDO.update({"전남광주": "전남광주", "전남광주통합특별시": "전남광주"})
+
+SIDO_OTHER = "기타"
+
+
+def region_first_word(region: pd.Series) -> pd.Series:
+    """근무지 문자열의 첫 낱말을 돌려준다. 결측은 결측으로 둔다.
+
+    첫 쉼표 앞의 글자에서 처음 나오는 공백, `>`, `&` 앞까지를 첫 낱말로 하고(`&`는 `&gt;` 같은 HTML
+    문자 표기의 시작이다), 끝에 붙은 `전지역`이나 `전체`를 뗀다.
+    """
+    r = region.astype("string")
+    word = r.str.extract(r"^\s*([^,\s>&]*)")[0].astype("string")
+    return word.str.replace(r"(?:전지역|전체)$", "", regex=True)
 
 
 def to_sido(region: pd.Series) -> pd.Series:
     """근무지 문자열을 시도 이름으로 바꾼다.
 
-    쉼표로 나눈 첫 부분의 첫 낱말에서 끝의 `전체`를 떼고 표로 바꾼다.
-    표에 없으면 `기타`, 원래 결측이면 결측이다.
+    `region_first_word`로 얻은 첫 낱말을 시도 표에서 찾는다. 표에 없고 `시`로 끝나면 끝의 `시`를 뗀
+    낱말을 다시 찾는다(`서울시` → `서울`). 그래도 없으면 `기타`, 원래 결측이면 결측이다.
+    시도 이름으로 시작하기만 하는 낱말(예: `서울대입구`)은 시도로 보지 않는다.
     """
     r = region.astype("string")
-    word = r.str.extract(r"^\s*([^,\s]*)")[0].str.replace(r"전체$", "", regex=True)
-    out = word.map(_SIDO).astype("string").fillna("기타")
-    return out.where(r.notna(), pd.NA)
+    word = region_first_word(r)
+    out = word.map(_SIDO).astype("string")
+    without_si = word.str.replace(r"시$", "", regex=True).map(_SIDO).astype("string")
+    out = out.fillna(without_si.where(word.str.endswith("시").fillna(False)))
+    return out.fillna(SIDO_OTHER).where(r.notna(), pd.NA)
 
 
 def _fmt_edge(e: float) -> str:

@@ -3,7 +3,8 @@ import re
 import numpy as np
 import pandas as pd
 import pytest
-from test_s00_scan import load_script
+from aabundle import skills, treatment
+from test_s00_scan import load_script, rewrite_postings
 
 def run(synth_data, tmp_path):
     s00 = load_script()
@@ -130,3 +131,85 @@ def test_report_numbers_keep_small_rates_and_csv_keeps_full_precision(synth_data
     # CSV에는 보고서용으로 줄인 값이 아니라 계산한 값 그대로가 들어간다
     csv = pd.read_csv(tmp_path / "s0" / "tables" / "t04_bzno_ked_by_treatment.csv", encoding="utf-8-sig")
     assert csv.loc[csv["has_use"] == False, "ked_matched_rate"].iloc[0] == pytest.approx(5 / 7, rel=1e-12)
+
+
+# 아래는 과제 10 수정(첫 실제 자료 실행에서 드러난 문제)에서 더한 시험이다.
+
+_NO_TIMING = {"skill_code": None, "n_train": 0, "n_features": 14, "seconds": None, "n_skills_kept": 0,
+              "est_total_hours": None}
+
+
+def test_post_start_missing_and_other_region_words_in_report(synth_data, tmp_path):
+    rewrite_postings(synth_data)   # p02, p07은 게시일 없음. p05, p09, p11, p12는 근무지가 `기타`
+    s00, t = run(synth_data, tmp_path)
+    m = t["t01b_post_start_missing"]
+    y = m[m["level"] == "연도"].set_index("year")
+    assert len(y) == 1 and pd.isna(y.loc[2025, "source"])
+    assert y.loc[2025, "n_raw"] == 12 and y.loc[2025, "n_no_post_start"] == 2
+    assert y.loc[2025, "no_post_start_rate"] == pytest.approx(2 / 12)
+    assert y.loc[2025, "in_occ_use_no_post_start_rate"] == pytest.approx(1 / 3)
+    s = m[m["level"] == "연도·수집 사이트"]
+    assert s["source"].tolist() == ["잡사이트A", "잡사이트B"]   # 게시일 없는 공고가 있는 사이트만, 건수가 같으면 이름 순
+    w = t["t12b_sido_other_words"]
+    assert list(w.columns) == ["word", "n"] and w.iloc[0].tolist() == ["광산구", 2]
+
+    text = s00.write_report(t, _NO_TIMING, synth_data["cfg"], tmp_path / "report.md", commit="c").read_text(encoding="utf-8")
+    sec = lambda i: text.index(f"## {i}. ")
+    assert sec(1) < text.index("### `t01_exclusions`") < text.index("### `t01b_post_start_missing`") < sec(2)
+    assert sec(11) < text.index("### `t12_sido_other`") < text.index("### `t12b_sido_other_words`")
+    assert "#### `level` = 연도\n" in text and "#### `level` = 연도·수집 사이트" in text
+    notes = s00._table_notes(synth_data["cfg"])
+    assert "`post_start` 결측" in notes["t01_exclusions"] and "t01b_post_start_missing" in notes["t01_exclusions"]
+
+
+def test_report_requires_the_new_interim_files(synth_data, tmp_path):
+    s00 = load_script()
+    s00.scan(synth_data["cfg"], synth_data["root"], tmp_path / "s0")
+    for name in ("post_start_missing", "sido_other_words"):
+        (tmp_path / "s0" / f"{name}.parquet").unlink()
+    with pytest.raises(FileNotFoundError, match=r"post_start_missing\.parquet, sido_other_words\.parquet"):
+        s00.build_tables(synth_data["cfg"], synth_data["root"], tmp_path / "s0")
+
+
+def test_report_row_limit_per_table():
+    s00 = load_script()
+    df = pd.DataFrame({"skill_code": [f"X{i:02d}" for i in range(40)], "kind": "개발", "2025": range(40)})
+    agent = "\n".join(s00._table_block("t06b_agent_skill_by_year", df, "설명"))
+    assert all(f"| X{i:02d} |" in agent for i in range(40)) and "위 30행만" not in agent
+    other = "\n".join(s00._table_block("t09a_by_ksic_sub", df.rename(columns={"skill_code": "ksic_sub"}), "설명"))
+    assert "| X29 |" in other and "| X30 |" not in other and "위 30행만" in other
+
+
+def test_source_rows_sorted_by_count_within_year(synth_data, tmp_path):
+    _, t = run(synth_data, tmp_path)
+    s = t["t05_source"]
+    first = s[s["year"] == 2025].iloc[0]
+    assert first["source"] == "잡사이트C" and first["n"] == s.loc[s["year"] == 2025, "n"].max()   # 잡사이트C 4건
+    csv = pd.read_csv(tmp_path / "s0" / "tables" / "t05_source.csv", encoding="utf-8-sig")
+    assert csv["source"].iloc[0] == "잡사이트C"
+
+
+def test_sparse_grid_uses_the_analysis_sample(synth_data, tmp_path):
+    cfg = synth_data["cfg"]; cfg["skills"]["sparse_filter"]["min_treated"] = 1
+    s00, d = load_script(), tmp_path / "s0"
+    s00.scan(cfg, synth_data["root"], d)
+    g = s00.build_tables(cfg, synth_data["root"], d)["t03b_sparse_filter_grid"]
+    row = g[(g["min_rate"] == cfg["skills"]["sparse_filter"]["min_rate"]) & (g["min_treated"] == 1)]
+    assert len(row) == 1
+    codes = treatment.agent_skill_codes(skills.load_codebook(synth_data["codebook"]), cfg)
+    long = skills.drop_codes(pd.read_parquet(d / "skills_long.parquet"), codes["dev"] | codes["use"])
+    timing = s00.time_outcome_model(pd.read_parquet(d / "base.parquet"), pd.read_parquet(d / "treat.parquet"), long, cfg)
+    assert row["n_skills_kept"].iloc[0] == timing["n_skills_kept"] == 1   # SM-01-0001 (처치 공고 p02)
+    assert row["n_postings"].iloc[0] == 7      # 네 단계를 모두 통과한 공고: p01 p02 p03 p05 p09 p11 p12
+    assert row["n_treated"].iloc[0] == 2       # p02, p05 (p04는 사업자번호가 없어 빠진다)
+
+
+def test_report_wording(synth_data, tmp_path):
+    s00, t = run(synth_data, tmp_path)
+    text = s00.write_report(t, _NO_TIMING, synth_data["cfg"], tmp_path / "report.md", commit="c").read_text(encoding="utf-8")
+    assert "## 1. 제외 규칙 단계별 공고 수 (연도별): 분석 기간, 분석 대상 직종 한정" in text
+    assert "(기간 단위: 분기 (`quarter`))" in text
+    assert text.index("희소 필터는 출현율이") < text.index("### `t03b_sparse_filter_grid`")
+    assert text.index("## 7. ") < text.index("결과모형은 공고의 특성으로") < text.index("## 8. ")
+    notes = s00._table_notes(synth_data["cfg"])
+    assert "8절" in notes["t02a_treated_by_period"] and "n_skills_kept" in "".join(s00._timing_block(_NO_TIMING, synth_data["cfg"]))

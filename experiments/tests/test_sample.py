@@ -11,8 +11,32 @@ def test_to_sido_variants():
     s = pd.Series(["서울 마포구, 서울전체, 영등포구", "충청남도 천안시", "세종특별자치시", "서울전체,",
                    "광산구", "아시아·중동", "전남광주 어딘가", None])
     out = sample.to_sido(s)
-    assert out.tolist()[:7] == ["서울", "충남", "세종", "서울", "기타", "기타", "기타"]
+    # 7번째 값: 과제 10 수정에서 전남광주를 별도 범주로 두기로 해(설계 문서 6.7절 16번) `기타`에서 바꿨다
+    assert out.tolist()[:7] == ["서울", "충남", "세종", "서울", "기타", "기타", "전남광주"]
     assert pd.isna(out[7])
+
+def test_to_sido_real_forms():
+    s = pd.Series(["서울시", "인천시 연수구", "대전시", "세종전지역", "서울>서울전지역", "서울>강남구",
+                   "서울&gt;강남구", "서울전지역", "경기전지역", "전남광주", "전남광주통합특별시 광산구",
+                   "아시아·중동", "전국", "글로벌", "서울특별시 강남구, 경기도 성남시", None])
+    out = sample.to_sido(s)
+    assert out.iloc[:11].tolist() == ["서울", "인천", "대전", "세종", "서울", "서울", "서울", "서울", "경기",
+                                      "전남광주", "전남광주"]
+    assert out.iloc[11:14].tolist() == ["기타", "기타", "기타"]
+    assert out.iloc[14] == "서울"
+    assert pd.isna(out.iloc[15])
+
+
+def test_to_sido_does_not_match_by_prefix():
+    out = sample.to_sido(pd.Series(["서울대입구", "경기장", "부산물", "시"]))
+    assert out.tolist() == ["기타", "기타", "기타", "기타"]
+
+
+def test_region_first_word():
+    out = sample.region_first_word(pd.Series(["서울>강남구", "세종전지역", " 서울시 강남구", "서울전체, 부산", "", None]))
+    assert out.iloc[:5].tolist() == ["서울", "세종", "서울시", "서울", ""]
+    assert pd.isna(out.iloc[5])
+
 
 def test_salary_band():
     s = pd.Series([None, 25_000_000, 40_000_000])

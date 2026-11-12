@@ -32,7 +32,11 @@ from sklearn.model_selection import GroupKFold
 import paths
 from aabundle import classif, ked, rawio, sample, skills, treatment
 
-OUTPUT_NAMES = ("occ_year_all", "base", "treat", "skills_long", "scan_stats", "kw_pattern_hits")
+OUTPUT_NAMES = ("occ_year_all", "base", "treat", "skills_long", "scan_stats", "kw_pattern_hits",
+                "post_start_missing", "sido_other_words")
+# 시도가 `기타`인 공고의 근무지 첫 낱말 표에 남기는 낱말 수와 낱말의 최대 글자 수
+SIDO_OTHER_WORDS_TOP = 200
+SIDO_OTHER_WORD_MAX_CHARS = 20
 
 _STR = pa.string()
 _INT = pa.int64()
@@ -52,6 +56,10 @@ OCC_SCHEMA = pa.schema([("year", _INT), ("keco4", _STR), ("n", _INT), ("n_skill"
 STATS_SCHEMA = pa.schema([("year", _INT), ("n_raw", _INT), ("n_in_period", _INT), ("n_in_occ", _INT),
                           ("n_tokens", _INT), ("n_unmatched", _INT), ("n_length_mismatch_rows", _INT)])
 KW_SCHEMA = pa.schema([("year", _INT), ("dictionary", _STR), ("pattern", _STR), ("n", _INT)])
+_PSM_COUNTS = ["n_raw", "n_no_post_start", "n_in_occ", "n_in_occ_no_post_start", "n_in_occ_use",
+               "n_in_occ_use_no_post_start"]
+PSM_SCHEMA = pa.schema([("year", _INT), ("source", _STR)] + [(c, _INT) for c in _PSM_COUNTS])
+WORDS_SCHEMA = pa.schema([("word", _STR), ("n", _INT)])
 
 _STAT_KEYS = ["n_tokens", "n_unmatched", "n_length_mismatch_rows"]
 
@@ -127,10 +135,38 @@ def _part_path(path: Path) -> Path:
     return path.with_name(path.name + ".part")
 
 
-def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
-    """원자료를 한 번 훑어 중간 자료 여섯 파일을 `out_dir`에 쓰고 {이름: 경로}를 돌려준다.
+def _empty_frame(schema: pa.Schema) -> pd.DataFrame:
+    return pd.DataFrame({f.name: pd.Series([], dtype=f.type.to_pandas_dtype()) for f in schema})
 
-    입력을 확인한 뒤 훑기 전에, `out_dir`에 있는 이 함수의 결과 파일 여섯 개와 그 `.part` 파일을 지운다
+
+def _post_start_counts(raw: pd.DataFrame, in_occ: np.ndarray, has_use: np.ndarray) -> pd.DataFrame:
+    """행 묶음 하나의 모든 공고를 수집 사이트별로 세어, 게시일(`post_start`)이 없는 공고 수를 함께 돌려준다.
+
+    `in_occ`는 분석 대상 세분류 여부, `has_use`는 생성형 AI 활용 숙련 보유 여부이며 `raw`와 위치로 맞춘다.
+    """
+    no_date = raw["post_start"].isna().to_numpy(dtype=bool)
+    occ_use = in_occ & has_use
+    df = pd.DataFrame({
+        "source": raw["source"].astype("string").fillna(MISSING_LABEL).to_numpy(),
+        "n_raw": np.ones(len(raw), dtype="int64"),
+        "n_no_post_start": no_date.astype("int64"),
+        "n_in_occ": in_occ.astype("int64"),
+        "n_in_occ_no_post_start": (in_occ & no_date).astype("int64"),
+        "n_in_occ_use": occ_use.astype("int64"),
+        "n_in_occ_use_no_post_start": (occ_use & no_date).astype("int64"),
+    })
+    return df.groupby("source", as_index=False).sum()
+
+
+def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
+    """원자료를 한 번 훑어 중간 자료 여덟 파일(`OUTPUT_NAMES`)을 `out_dir`에 쓰고 {이름: 경로}를 돌려준다.
+
+    `post_start_missing`은 공고 파일의 모든 공고를 파일 연도 × 수집 사이트별로 세어 게시일이 없는 공고 수를
+    적은 표이고, `sido_other_words`는 `base`에 들어간 공고 가운데 시도가 `기타`인 공고의 근무지 첫 낱말
+    (`sample.region_first_word`, 20자까지)별 공고 수를 많은 순으로 200개까지 적은 표이다. 근무지 열 자체는
+    `base`에 쓰지 않는다.
+
+    입력을 확인한 뒤 훑기 전에, `out_dir`에 있는 이 함수의 결과 파일 여덟 개와 그 `.part` 파일을 지운다
     (폴더의 다른 파일은 건드리지 않는다). 각 파일은 먼저 `.part`가 붙은 이름으로 쓰고, 모든 연도를 끝까지
     처리한 뒤에 정해진 이름으로 바꾼다. 이름 바꾸기까지 어느 단계에서든 멈추면 이번 실행의 결과 파일과
     `.part` 파일을 모두 지우고 예외를 다시 낸다. 그래서 `out_dir`에 남은 결과 파일은 끝까지 처리된 한 번의
@@ -169,13 +205,14 @@ def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
         for name in ("base", "treat", "skills_long"):
             writers[name] = rawio.parquet_writer(parts[name], schemas[name])
 
-        occ_pieces, stats_rows, base_ids = [], [], []
+        occ_pieces, stats_rows, base_ids, psm_pieces = [], [], [], []
         hits = defaultdict(int)
+        other_words = defaultdict(int)
         for year in years:
             t0 = time.perf_counter()
             pf = files[year]
             acc = {"base": [], "treat": [], "skills_long": []}
-            occ_year = []
+            occ_year, psm_year = [], []
             st = {"year": year, "n_raw": 0, "n_in_period": 0, "n_in_occ": 0, **{k: 0 for k in _STAT_KEYS}}
 
             for i in range(pf.num_row_groups):
@@ -199,12 +236,22 @@ def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
 
                 # 분석 기간과 분석 대상 직종에 드는 공고만 남긴다
                 b = sample.build_posting_base(raw, ked_firm, ksic_valid, cfg)
-                keep = b["in_period"].to_numpy(dtype=bool) & b["in_occ"].to_numpy(dtype=bool)
+                in_occ = b["in_occ"].to_numpy(dtype=bool)
+                # 모든 공고: 게시일이 없는 공고 수(분석 기간 단계에서 빠지는 공고)
+                psm_year.append(_post_start_counts(raw, in_occ, flags["has_use"].to_numpy(dtype=bool)))
+                keep = b["in_period"].to_numpy(dtype=bool) & in_occ
                 st["n_in_period"] += int(b["in_period"].sum())
                 st["n_in_occ"] += int(keep.sum())
                 if not keep.any():
                     continue
                 b = b[keep].reset_index(drop=True)
+                # base에 들어가는 공고 가운데 시도가 `기타`인 공고의 근무지 첫 낱말을 센다. 근무지 열은 쓰지 않는다.
+                other = (b["sido"] == sample.SIDO_OTHER).fillna(False).to_numpy(dtype=bool)
+                if other.any():
+                    region = raw["region"][keep].reset_index(drop=True)[other]
+                    words = sample.region_first_word(region).str.slice(0, SIDO_OTHER_WORD_MAX_CHARS)
+                    for w, n in words.value_counts().items():
+                        other_words[str(w)] += int(n)
                 n_skills = long["posting_id"].value_counts()
                 b["n_skills"] = n_skills.reindex(b["posting_id"], fill_value=0).to_numpy(dtype="int64")
                 long = long[long["posting_id"].isin(b["posting_id"])].reset_index(drop=True)
@@ -239,6 +286,10 @@ def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
             if occ_year:
                 occ_pieces.append(pd.concat(occ_year, ignore_index=True)
                                   .groupby(["year", "keco4"], as_index=False).sum())
+            if psm_year:
+                g = pd.concat(psm_year, ignore_index=True).groupby("source", as_index=False).sum()
+                g.insert(0, "year", year)
+                psm_pieces.append(g)
             stats_rows.append(st)
             print(f"{year}년 파일: {st['n_raw']:,}행 읽음, {time.perf_counter() - t0:.1f}초", flush=True)
 
@@ -251,15 +302,27 @@ def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
                    .groupby(["year", "keco4"], as_index=False).sum()
                    .sort_values(["year", "keco4"], ignore_index=True))
         else:
-            occ = pd.DataFrame({f.name: pd.Series([], dtype=f.type.to_pandas_dtype()) for f in OCC_SCHEMA})
+            occ = _empty_frame(OCC_SCHEMA)
         stats = pd.DataFrame(stats_rows, columns=STATS_SCHEMA.names)
         kw_years = sorted(set(years) | {y for y, _ in hits})
         kw_hits = pd.DataFrame(
             [(y, d, p, hits.get((y, p), 0)) for y in kw_years for d, p in labelled],
             columns=KW_SCHEMA.names,
         )
+        if psm_pieces:
+            psm = (pd.concat(psm_pieces, ignore_index=True)[PSM_SCHEMA.names]
+                   .sort_values(["year", "source"], ignore_index=True))
+        else:
+            psm = _empty_frame(PSM_SCHEMA)
+        if other_words:
+            words = (pd.DataFrame(list(other_words.items()), columns=WORDS_SCHEMA.names)
+                     .sort_values(["n", "word"], ascending=[False, True], ignore_index=True)
+                     .head(SIDO_OTHER_WORDS_TOP))
+        else:
+            words = _empty_frame(WORDS_SCHEMA)
         for name, df, schema in (("occ_year_all", occ, OCC_SCHEMA), ("scan_stats", stats, STATS_SCHEMA),
-                                 ("kw_pattern_hits", kw_hits, KW_SCHEMA)):
+                                 ("kw_pattern_hits", kw_hits, KW_SCHEMA), ("post_start_missing", psm, PSM_SCHEMA),
+                                 ("sido_other_words", words, WORDS_SCHEMA)):
             with rawio.parquet_writer(parts[name], schema) as w:
                 w.write_table(_to_table(df, schema))
 
@@ -303,7 +366,7 @@ _TIMING_BASE_COLUMNS = list(dict.fromkeys(["posting_id", "bzno", "n_skills", *_E
 
 
 def _require_interim(s0_dir: Path) -> None:
-    """1단계의 중간 자료 여섯 파일이 모두 있는지 확인한다. 없으면 없는 파일 이름을 적은 예외를 낸다."""
+    """1단계의 중간 자료 여덟 파일이 모두 있는지 확인한다. 없으면 없는 파일 이름을 적은 예외를 낸다."""
     missing = [f"{n}.parquet" for n in OUTPUT_NAMES if not (s0_dir / f"{n}.parquet").is_file()]
     if missing:
         raise FileNotFoundError(
@@ -406,6 +469,27 @@ def _t01_exclusions(stats: pd.DataFrame, counts: pd.DataFrame) -> pd.DataFrame:
     return out.assign(_o=order).sort_values(["year", "_o"], kind="stable").drop(columns="_o").reset_index(drop=True)
 
 
+_T01B_COLUMNS = ["level", "year", "source", "n_raw", "n_no_post_start", "no_post_start_rate", "n_in_occ",
+                 "n_in_occ_no_post_start", "n_in_occ_use", "n_in_occ_use_no_post_start", "in_occ_use_no_post_start_rate"]
+
+
+def _t01b_post_start_missing(psm: pd.DataFrame) -> pd.DataFrame:
+    """게시일이 없는 공고 수. 연도별 행(`level` = 연도)과, 게시일이 없는 공고가 있는 연도 × 수집 사이트별 행."""
+    by_year = psm.groupby("year", as_index=False)[_PSM_COUNTS].sum()
+    by_year.insert(0, "level", "연도")
+    by_year.insert(2, "source", pd.Series(pd.NA, index=by_year.index, dtype="string"))
+    site = psm[psm["n_no_post_start"] > 0].sort_values(["year", "n_no_post_start", "source"],
+                                                       ascending=[True, False, True])
+    site = site.assign(source=site["source"].astype("string"))
+    site.insert(0, "level", "연도·수집 사이트")
+    pieces = [d for d in (by_year, site) if not d.empty]
+    out = pd.concat(pieces, ignore_index=True) if pieces else by_year
+    out = out.astype({"year": "int64", **{c: "int64" for c in _PSM_COUNTS}})
+    out["no_post_start_rate"] = _rate(out["n_no_post_start"], out["n_raw"])
+    out["in_occ_use_no_post_start_rate"] = _rate(out["n_in_occ_use_no_post_start"], out["n_in_occ_use"])
+    return out[_T01B_COLUMNS]
+
+
 def _t02a_treated_by_period(base: pd.DataFrame, flags: pd.DataFrame, alive: np.ndarray) -> pd.DataFrame:
     b = base.loc[alive, ["year", "month", "quarter"]]
     f = flags.loc[alive].astype("int64")
@@ -446,19 +530,35 @@ def _t03a_skills_per_posting(base: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame([row])
 
 
-def _t03b_sparse_filter_grid(long: pd.DataFrame, treat: pd.DataFrame, n_postings: int,
+def _sparse_filter_sample(alive: np.ndarray, treat: pd.DataFrame, pos: np.ndarray, skill_code: pd.Series,
+                          definition: str, cfg: dict) -> tuple[pd.DataFrame, np.ndarray, pd.Series]:
+    """희소 필터를 적용할 공고와 숙련을 정한다. `t03b_sparse_filter_grid`와 `time_outcome_model`이 함께 쓴다.
+
+    대상 공고는 제외 규칙 네 단계를 통과한 공고(`alive`, base와 같은 길이)이다. `pos`와 `skill_code`는 숙련 긴 표의
+    행별 base 위치와 숙련 코드이다. 돌려주는 값은 대상 공고의 행만 남긴 숙련 표(열 `posting_id`는 base에서의 위치,
+    `skill_code`), 대상 공고의 base 위치, 대상 공고의 처치 정의 값(`select_arms`, 대상 공고와 같은 순서)이다.
+    """
+    alive_idx = np.flatnonzero(alive)
+    arm = treatment.select_arms(treat.iloc[alive_idx], definition, _keyword_col(cfg))
+    keep = alive[pos]
+    lk = pd.DataFrame({"posting_id": pos[keep], "skill_code": skill_code[keep].reset_index(drop=True)})
+    return lk, alive_idx, arm
+
+
+def _t03b_sparse_filter_grid(long: pd.DataFrame, treat: pd.DataFrame, alive: np.ndarray,
                              agent_codes: set[str], cfg: dict) -> pd.DataFrame:
-    arm = treatment.select_arms(treat, "use", _keyword_col(cfg))
-    treated = set(np.flatnonzero((arm == 1).fillna(False).to_numpy(dtype=bool)).tolist())
-    outcome = skills.drop_codes(pd.DataFrame({"posting_id": long["pos"], "skill_code": long["skill_code"]}),
-                                agent_codes)
+    outcome = skills.drop_codes(long[["pos", "skill_code"]], agent_codes)
+    lk, alive_idx, arm = _sparse_filter_sample(alive, treat, outcome["pos"].to_numpy(), outcome["skill_code"],
+                                               "use", cfg)
+    treated = set(alive_idx[(arm == 1).fillna(False).to_numpy(dtype=bool)].tolist())
+    n_postings = len(alive_idx)
     sf = cfg["skills"]["sparse_filter"]
     rates = sorted(set(SPARSE_GRID_MIN_RATE) | {float(sf["min_rate"])})
     mins = sorted(set(SPARSE_GRID_MIN_TREATED) | {int(sf["min_treated"])})
     rows = []
     for r in rates:
         for m in mins:
-            kept = skills.sparse_filter(outcome, treated, n_postings, r, m) if n_postings > 0 else []
+            kept = skills.sparse_filter(lk, treated, n_postings, r, m) if n_postings > 0 else []
             rows.append({"min_rate": r, "min_treated": m, "n_skills_kept": len(kept),
                          "n_postings": n_postings, "n_treated": len(treated)})
     return pd.DataFrame(rows)
@@ -506,6 +606,8 @@ def _t05_source(base: pd.DataFrame, flags: pd.DataFrame) -> pd.DataFrame:
     g["share_in_year"] = _rate(g["n"], g.groupby("year")["n"].transform("sum"))
     g["has_use_rate"] = _rate(g["n_use"], g["n"])
     g["has_skill_rate"] = _rate(g["n_skill"], g["n"])
+    # 연도 안에서는 공고가 많은 사이트부터 싣는다(보고서에서 행이 잘려도 큰 사이트가 남게 하기 위해서다)
+    g = g.sort_values(["year", "n", "source"], ascending=[True, False, True], ignore_index=True)
     return g[["year", "source", "n", "share_in_year", "has_use_rate", "has_skill_rate"]]
 
 
@@ -621,6 +723,11 @@ def _t12_sido_other(base: pd.DataFrame) -> pd.DataFrame:
     return out.sort_values(["n", "sido"], ascending=[False, True], ignore_index=True)
 
 
+def _t12b_sido_other_words(words: pd.DataFrame) -> pd.DataFrame:
+    out = words[["word", "n"]].astype({"n": "int64"})
+    return out.sort_values(["n", "word"], ascending=[False, True], ignore_index=True)
+
+
 def build_tables(cfg: dict, root: Path, s0_dir: Path) -> dict[str, pd.DataFrame]:
     """1단계의 중간 자료로 자료 점검 집계표를 만들어 {표 이름: 표}로 돌려준다.
 
@@ -644,16 +751,19 @@ def build_tables(cfg: dict, root: Path, s0_dir: Path) -> dict[str, pd.DataFrame]
     stats = pd.read_parquet(s0_dir / "scan_stats.parquet")
     occ = pd.read_parquet(s0_dir / "occ_year_all.parquet")
     kw = pd.read_parquet(s0_dir / "kw_pattern_hits.parquet")
+    psm = pd.read_parquet(s0_dir / "post_start_missing.parquet")
+    other_words = pd.read_parquet(s0_dir / "sido_other_words.parquet")
 
     alive, counts = _exclusions(base, cfg)
     years = sorted({int(y) for y in cfg["data"]["years"]} | {int(y) for y in base["year"].unique()})
 
     tables = {
         "t01_exclusions": _t01_exclusions(stats, counts),
+        "t01b_post_start_missing": _t01b_post_start_missing(psm),
         "t02a_treated_by_period": _t02a_treated_by_period(base, flags, alive),
         "t02b_treated_by_occ": _t02b_treated_by_occ(base, flags, keco, cfg),
         "t03a_skills_per_posting": _t03a_skills_per_posting(base),
-        "t03b_sparse_filter_grid": _t03b_sparse_filter_grid(long, treat, len(base), codes["dev"] | codes["use"], cfg),
+        "t03b_sparse_filter_grid": _t03b_sparse_filter_grid(long, treat, alive, codes["dev"] | codes["use"], cfg),
         "t03c_skills_by_source_column": _t03c_skills_by_source_column(long, codebook),
         "t03d_match_stats": stats[["year", "n_tokens", "n_unmatched", "n_length_mismatch_rows"]].copy(),
         "t04_bzno_ked_by_treatment": _t04_bzno_ked_by_treatment(base, flags),
@@ -669,6 +779,7 @@ def build_tables(cfg: dict, root: Path, s0_dir: Path) -> dict[str, pd.DataFrame]
         "t10b_occ_list_check": _t10b_occ_list_check(occ, cfg),
         "t11_salary": _t11_salary(base),
         "t12_sido_other": _t12_sido_other(base),
+        "t12b_sido_other_words": _t12b_sido_other_words(other_words),
     }
     table_dir = rawio._check_out_path(s0_dir / "tables")
     table_dir.mkdir(parents=True, exist_ok=True)
@@ -695,7 +806,8 @@ def time_outcome_model(base: pd.DataFrame, treat: pd.DataFrame, long: pd.DataFra
 
     대상은 제외 규칙을 모두 적용한 공고 가운데 설정의 처치 정의로 처치 공고(1)나 비교 공고(0)인 공고이다.
     결과변수는 희소 필터(설정의 기준)를 통과한 숙련 가운데 가장 많은 공고에 나온 숙련의 보유 여부이고,
-    통과한 숙련이 없으면 전체에서 가장 많이 나온 숙련을 쓴다. 기업(`bzno`)으로 나눈 첫 번째 분할의
+    통과한 숙련이 없으면 전체에서 가장 많이 나온 숙련을 쓴다. 희소 필터의 대상 공고와 처치 공고는
+    `t03b_sparse_filter_grid`와 같은 함수(`_sparse_filter_sample`)로 정한다. 기업(`bzno`)으로 나눈 첫 번째 분할의
     학습 쪽에서 비교 공고만으로 한 번 학습한다. `long`에서 AI 에이전트 숙련코드는 부르는 쪽이 미리 뺀다.
 
     처치 공고가 없거나, 비교 공고의 기업 수가 겹 수보다 적거나, 학습할 공고가 없거나 결과변수가 한 값뿐이면
@@ -711,18 +823,16 @@ def time_outcome_model(base: pd.DataFrame, treat: pd.DataFrame, long: pd.DataFra
     treat = treat.reset_index(drop=True)
     _check_same_postings(treat, base)
     alive, _ = _exclusions(base, cfg)
-    alive_idx = np.flatnonzero(alive)
-    if len(alive_idx) == 0 or long.empty:
+    if not alive.any() or long.empty:
         return out
 
-    arm = treatment.select_arms(treat.iloc[alive_idx], cfg["treatment"]["definition"], _keyword_col(cfg))
+    # 숙련 긴 표는 공고 번호 대신 base에서의 위치로 다루고, 제외 규칙을 통과한 공고의 행만 남긴다.
+    # 희소 필터의 대상은 t03b_sparse_filter_grid와 같은 함수로 정한다.
+    pos = _positions(long["posting_id"], base["posting_id"])
+    lk, alive_idx, arm = _sparse_filter_sample(alive, treat, pos, long["skill_code"],
+                                               cfg["treatment"]["definition"], cfg)
     is_treated = (arm == 1).fillna(False).to_numpy(dtype=bool)
     is_comparison = (arm == 0).fillna(False).to_numpy(dtype=bool)
-
-    # 숙련 긴 표는 공고 번호 대신 base에서의 위치로 다루고, 제외 규칙을 통과한 공고의 행만 남긴다.
-    pos = _positions(long["posting_id"], base["posting_id"])
-    keep = alive[pos]
-    lk = pd.DataFrame({"posting_id": pos[keep], "skill_code": long["skill_code"][keep].reset_index(drop=True)})
     if lk.empty:
         return out
     kept_codes = skills.sparse_filter(lk, set(alive_idx[is_treated].tolist()), len(alive_idx),
@@ -763,10 +873,11 @@ def time_outcome_model(base: pd.DataFrame, treat: pd.DataFrame, long: pd.DataFra
 
 # --- 보고서 ----------------------------------------------------------------
 
-# (절 번호, 절 제목, 표 이름). 1~10절의 제목은 설계 문서 6.6절의 항목 내용 그대로이다.
+# (절 번호, 절 제목, 표 이름). 1~10절의 제목은 설계 문서 6.6절의 항목 내용 그대로이다. 다만 1절 제목에는
+# 표에 있는 분석 기간 단계를 더했다.
 REPORT_SECTIONS = [
-    (1, "제외 규칙 단계별 공고 수 (연도별): 분석 대상 직종 한정, 사업자번호 없음, 숙련 없음",
-     ["t01_exclusions"]),
+    (1, "제외 규칙 단계별 공고 수 (연도별): 분석 기간, 분석 대상 직종 한정, 사업자번호 없음, 숙련 없음",
+     ["t01_exclusions", "t01b_post_start_missing"]),
     (2, "기간별 처치 공고 수 (분기·반기·연 단위): 키워드(엄격한 사전, 넓은 사전), 개발 숙련, 생성형 AI 활용 숙련, "
         "숙련코드 전체, 키워드와 숙련코드를 합친 것 각각. 분석 대상 세분류별·중분류별 처치 공고 수(처치 정의별)",
      ["t02a_treated_by_period", "t02b_treated_by_occ"]),
@@ -785,14 +896,27 @@ REPORT_SECTIONS = [
     (10, "분석 대상 세분류 28개 각각의 생성형 AI 활용 숙련 공고 수와 비율(연도별, 제외 규칙 적용 뒤). "
          "전체 공고에서 세분류별 생성형 AI 활용 숙련 공고 수를 다시 세어 3.4절의 28개 목록과 같은지 확인",
      ["t10a_use_by_occ_year", "t10b_occ_list_check"]),
-    (11, "연봉과 근무지", ["t11_salary", "t12_sido_other"]),
+    (11, "연봉과 근무지", ["t11_salary", "t12_sido_other", "t12b_sido_other_words"]),
 ]
 
+# 절 제목 바로 아래에 싣는 문장. 그 절에서 처음 나오는 용어의 정의이다.
+REPORT_SECTION_INTROS = {
+    3: "희소 필터는 출현율이 기준보다 낮거나 처치 공고에서 나온 횟수가 기준보다 적은 숙련을 결과변수에서 빼는 규칙이다.",
+    7: "결과모형은 공고의 특성으로 그 숙련이 공고에 들어 있을 확률을 예측하는 모형이다.",
+}
+# 보고서 머리에 쓰는 기간 단위(`period.unit`)의 한국어 이름
+PERIOD_UNIT_LABELS = {"quarter": "분기", "half": "반기", "year": "연"}
+
 # 보고서에서 이 열의 값마다 따로 나눠 싣는 표. 행이 30개를 넘어 뒤쪽 행이 잘리지 않게 하기 위해서다.
-REPORT_SPLIT = {"t02a_treated_by_period": "unit", "t02b_treated_by_occ": "level", "t05_source": "year",
-                "t06a_overlap": "cross", "t06b_agent_skill_by_year": "kind", "t10b_occ_list_check": "status"}
-# 나눠 실을 때 그 부분에서 값이 하나도 없는 열을 빼는 표(두 교차표의 열이 서로 달라서다)
-REPORT_DROP_EMPTY_COLUMNS = {"t06a_overlap"}
+REPORT_SPLIT = {"t01b_post_start_missing": "level", "t02a_treated_by_period": "unit",
+                "t02b_treated_by_occ": "level", "t05_source": "year", "t06a_overlap": "cross",
+                "t06b_agent_skill_by_year": "kind", "t10b_occ_list_check": "status"}
+# 나눠 실을 때 그 부분에서 값이 하나도 없으면 빼는 열. None이면 모든 열이 대상이다.
+# t06a는 두 교차표의 열이 서로 달라서, t01b는 연도 행에 수집 사이트가 없어서다.
+REPORT_DROP_EMPTY_COLUMNS = {"t06a_overlap": None, "t01b_post_start_missing": ["source"]}
+# 보고서에 싣는 행 수를 표마다 따로 정한 것. None이면 모든 행을 싣는다. 여기 없는 표는 REPORT_MAX_ROWS이다.
+# t06b는 설계 문서 6.6절 6번이 AI 에이전트 숙련코드 54개 각각을 보이라고 해서다.
+REPORT_MAX_ROWS_BY_TABLE = {"t06b_agent_skill_by_year": None}
 # 보고서에서 정규표현식 패턴이 든 열. 값을 코드 표시(백틱)로 감싼다.
 REPORT_CODE_COLUMNS = {"pattern"}
 _PLAIN_INT_COLUMNS = {"year", "month", "min_treated"}
@@ -810,15 +934,29 @@ def _table_notes(cfg: dict) -> dict[str, str]:
             "`in_period`, `in_occ` 두 단계는 `scan_stats.parquet`(공고 파일의 모든 공고)에서 왔고 `year`는 공고 파일의 "
             "연도이다. `has_bzno`, `has_skill` 두 단계는 " + _BASE_NOTE + "에 `sample.apply_exclusions`를 적용한 것이고 "
             "`year`는 공고 게시일(`post_start`)의 연도이다. 두 연도 기준이 다르므로, 같은 `year` 행이라도 `in_occ`의 "
-            "`n_after`와 `has_bzno`의 `n_before`는 같지 않을 수 있다."),
+            "`n_after`와 `has_bzno`의 `n_before`는 같지 않을 수 있다. `in_period` 단계에서는 게시일이 분석 기간 밖인 "
+            "공고와 게시일이 없는 공고(`post_start` 결측)가 함께 빠진다. 게시일이 없는 공고의 수는 "
+            "`t01b_post_start_missing`에 있다."),
+        "t01b_post_start_missing": (
+            "대상: 공고 파일의 모든 공고. `year`는 공고 파일의 연도이다. 게시일이 없는 공고는 `in_period` 단계에서 "
+            "빠지므로 `base.parquet`에 없다. `n_raw`는 공고 수, `n_no_post_start`는 그 가운데 게시일(`post_start`)이 "
+            "없는 공고 수, `n_in_occ`는 게시일과 관계없이 분석 대상 세분류(`occupations.keco4`)에 드는 공고 수, "
+            "`n_in_occ_no_post_start`는 그 가운데 게시일이 없는 공고 수, `n_in_occ_use`는 분석 대상 세분류에 들고 "
+            "생성형 AI 활용 숙련이 있는 공고 수, `n_in_occ_use_no_post_start`는 그 가운데 게시일이 없는 공고 수이다. "
+            "`no_post_start_rate`는 `n_no_post_start / n_raw`, `in_occ_use_no_post_start_rate`는 "
+            "`n_in_occ_use_no_post_start / n_in_occ_use`이다. `level` = 연도는 연도별 합계이고, `level` = "
+            "연도·수집 사이트는 게시일이 없는 공고가 있는 사이트만 연도 안에서 그 공고가 많은 순으로 싣는다."),
         "t02a_treated_by_period": (
-            "대상: " + _ALIVE_NOTE + ". " + _POST_YEAR + " 처치 정의 열은 그 기간에 해당 표시가 참인 공고 수이다."),
+            "대상: " + _ALIVE_NOTE + ". " + _POST_YEAR + " 처치 정의 열은 그 기간에 해당 표시가 참인 공고 수이다. "
+            "자료가 마지막 기간의 도중에 끝나면 마지막 기간의 행에는 그 기간의 일부 달만 들어 있다. 이때 마지막 반기의 "
+            "행이 마지막 분기의 행과 같을 수 있다. 마지막 연도의 월별 공고 수는 8절의 `t08_2026_monthly`에 있다."),
         "t02b_treated_by_occ": "대상: " + _BASE_NOTE + ". `n`은 전체 공고 수, 처치 정의 열은 해당 표시가 참인 공고 수이다.",
         "t03a_skills_per_posting": (
             "대상: " + _BASE_NOTE + " 가운데 숙련이 하나 이상 있는 공고. 공고당 숙련 수는 `skills_long.parquet`의 "
             "공고별 행 수이다."),
         "t03b_sparse_filter_grid": (
-            "대상: " + _BASE_NOTE + ". 처치 공고는 생성형 AI 활용 처치 정의의 처치 공고(`select_arms(…, \"use\") == 1`)이다. "
+            "대상: " + _ALIVE_NOTE + "(7절의 학습 시간 측정에서 희소 필터를 적용하는 공고와 같다). 처치 공고는 이 공고 "
+            "가운데 생성형 AI 활용 처치 정의의 처치 공고(`select_arms(…, \"use\") == 1`)이다. "
             "AI 에이전트 숙련코드는 세기 전에 뺐다. `n_postings`는 출현율의 분모, `n_treated`는 처치 공고 수이다. "
             f"설정의 기준은 `min_rate` {cfg['skills']['sparse_filter']['min_rate']}, "
             f"`min_treated` {cfg['skills']['sparse_filter']['min_treated']}이다."),
@@ -865,7 +1003,12 @@ def _table_notes(cfg: dict) -> dict[str, str]:
             "대상: " + _BASE_NOTE + ". " + _POST_YEAR + " `n_stated`는 연봉(`salary_annual_min`)이 기재된 공고 수이고, "
             "분위수는 기재된 공고의 `salary_annual_min`(원)이다."),
         "t12_sido_other": (
-            "대상: " + _BASE_NOTE + ". `기타`는 근무지에서 시도를 알 수 없는 공고, `결측`은 근무지가 없는 공고이다."),
+            "대상: " + _BASE_NOTE + ". `기타`는 근무지에서 시도를 알 수 없는 공고, `결측`은 근무지가 없는 공고이다. "
+            "`전남광주`는 근무지가 `전남광주`나 `전남광주통합특별시`인 공고로, `광주`, `전남`과 따로 센다."),
+        "t12b_sido_other_words": (
+            "대상: " + _BASE_NOTE + " 가운데 시도가 `기타`인 공고. 근무지(`region`)의 첫 낱말(첫 쉼표 앞에서 처음 나오는 "
+            "공백, `>`, `&` 앞까지, 끝의 `전지역`과 `전체`를 뗀 것, 20자까지)별 공고 수를 많은 순으로 싣는다. "
+            f"CSV에는 많은 순으로 최대 {SIDO_OTHER_WORDS_TOP}개가 있다."),
     }
 
 
@@ -924,10 +1067,14 @@ def _display_path(path: str | None, name: str) -> str:
 
 
 def _table_block(name: str, df: pd.DataFrame, note: str) -> list[str]:
+    limit = REPORT_MAX_ROWS_BY_TABLE.get(name, REPORT_MAX_ROWS)
+
     def part(d: pd.DataFrame) -> list[str]:
-        out = [_md_table(d.head(REPORT_MAX_ROWS))]
-        if len(d) > REPORT_MAX_ROWS:
-            out.append(f"전체 {len(d):,}행 가운데 위 {REPORT_MAX_ROWS}행만 싣는다. 전체 표: "
+        if limit is None:
+            return [_md_table(d)]
+        out = [_md_table(d.head(limit))]
+        if len(d) > limit:
+            out.append(f"전체 {len(d):,}행 가운데 위 {limit}행만 싣는다. 전체 표: "
                        f"`{_display_path(df.attrs.get('csv_path'), name)}`")
         return out
 
@@ -937,7 +1084,9 @@ def _table_block(name: str, df: pd.DataFrame, note: str) -> list[str]:
         for value in pd.unique(df[split]):
             d = df[df[split] == value].drop(columns=split)
             if name in REPORT_DROP_EMPTY_COLUMNS:
-                d = d.dropna(axis=1, how="all")
+                subset = REPORT_DROP_EMPTY_COLUMNS[name]
+                d = d.drop(columns=[c for c in (d.columns if subset is None else subset)
+                                    if c in d.columns and d[c].isna().all()])
             lines += [f"#### `{split}` = {_fmt_cell(value, split)}", ""]
             lines += part(d) + [""]
     else:
@@ -960,7 +1109,10 @@ def _timing_block(timing: dict, cfg: dict) -> list[str]:
     lines = [
         "대상: " + _ALIVE_NOTE + " 가운데 설정의 처치 정의(`" + str(cfg["treatment"]["definition"]) + "`)로 처치 공고나 "
         "비교 공고인 공고. 기업(`bzno`)으로 나눈 " + str(est["n_folds"]) + "겹 분할의 첫 번째 분할에서 학습 쪽의 비교 "
-        "공고만으로 LightGBM 분류 모형을 한 번 학습했다. 설정: `" + str(est["lgbm"]) + "`, 난수 " + str(est["seed"]) + ".",
+        "공고만으로 LightGBM 분류 모형을 한 번 학습했다. 설정: `" + str(est["lgbm"]) + "`, 난수 " + str(est["seed"]) + ". "
+        "`n_skills_kept`는 3절 `t03b_sparse_filter_grid`에서 `config.yaml`의 기준(`skills.sparse_filter`)에 해당하는 "
+        "행의 `n_skills_kept`이다(두 곳이 같은 공고와 같은 처치 공고를 쓴다. 단, `t03b`는 처치 정의를 생성형 AI 활용"
+        "(`use`)으로 정해 두었으므로 설정의 처치 정의가 `use`가 아니면 두 값이 다를 수 있다).",
         "",
         _md_table(rows),
         "",
@@ -976,12 +1128,14 @@ def write_report(tables: dict, timing: dict, cfg: dict, report_path: Path, commi
     report_path = rawio._check_out_path(report_path)
     notes = _table_notes(cfg)
     k = cfg["treatment"]["keywords"]
+    unit = str(cfg["period"]["unit"])
+    unit_text = f"{PERIOD_UNIT_LABELS[unit]} (`{unit}`)" if unit in PERIOD_UNIT_LABELS else f"`{unit}`"
     lines = [
         "# 자료 점검(S0) 보고서",
         "",
         f"- 실행한 날: {dt.date.today().isoformat()}",
         f"- 코드 시점(git 커밋): {commit}",
-        f"- 분석 기간: {cfg['period']['start']} ~ {cfg['period']['end']} (기간 단위: {cfg['period']['unit']})",
+        f"- 분석 기간: {cfg['period']['start']} ~ {cfg['period']['end']} (기간 단위: {unit_text})",
         f"- 분석 대상 세분류 수: {len(cfg['occupations']['keco4'])}",
         f"- 키워드 사전은 임시값이다(확정 전). 엄격한 사전 {len(k['strict'])}개, 넓은 사전에 더한 표현 "
         f"{len(k['broad_extra'])}개, 제외 표현 {len(k['exclude'])}개 (`config.yaml`의 `treatment.keywords`).",
@@ -991,6 +1145,8 @@ def write_report(tables: dict, timing: dict, cfg: dict, report_path: Path, commi
     ]
     for number, title, names in REPORT_SECTIONS:
         lines += [f"## {number}. {title}", ""]
+        if number in REPORT_SECTION_INTROS:
+            lines += [REPORT_SECTION_INTROS[number], ""]
         if number == 7:
             lines += _timing_block(timing, cfg)
         for name in names:

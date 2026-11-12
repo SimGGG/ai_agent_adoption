@@ -10,7 +10,8 @@ import pytest
 from aabundle import rawio
 from test_s00_scan import load_script
 
-OUT_NAMES = ["occ_year_all", "base", "treat", "skills_long", "scan_stats", "kw_pattern_hits"]
+OUT_NAMES = ["occ_year_all", "base", "treat", "skills_long", "scan_stats", "kw_pattern_hits",
+             "post_start_missing", "sido_other_words"]   # 뒤의 두 파일은 과제 10 수정에서 더했다
 
 
 def _year_file(synth_data, year, prefix, changes):
