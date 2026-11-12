@@ -25,6 +25,7 @@ def test_loaders_read_synthetic_tables(synth_data):
     keco = classif.load_keco(synth_data["keco"])
     assert keco["keco4"].tolist() == ["1332", "0262", "9052"]
     assert set(keco.columns) == {"keco4", "keco4_name", "keco2", "keco2_name"}
+    assert keco["keco2"].tolist() == ["13", "02", "90"]
 
 
 def test_load_keco_fills_merged_cells(tmp_path):
