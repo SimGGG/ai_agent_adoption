@@ -402,7 +402,10 @@ def test_loaders_read_synthetic_tables(synth_data):
 
 **원자료 형식.** `|` 구분, CP949, 머리 줄 없음, 한 줄에 48개 항목(구분자 47개).
 
-**읽는 방법.** 파일을 바이트로 한 줄씩 읽어 `|`의 개수가 정확히 47개인 줄만 남기고, `chunksize`줄씩 모아 `pandas.read_csv`에 넘긴다. `read_csv`의 설정: `sep="|"`, `header=None`, `names=range(48)`, `usecols=FIELDS의 번호들`, `dtype=str`, `encoding="cp949"`, `encoding_errors="replace"`, `quoting=csv.QUOTE_NONE`. 항목 수가 다른 줄을 `read_csv`의 `on_bad_lines`에 맡기지 않는다. `usecols`를 주면 항목이 많은 줄이 걸러지지 않고 밀린 채 읽힐 수 있기 때문이다.
+**읽는 방법.** (실행 중 수정, 2026-11-12) 파일을 바이트로 한 줄씩 읽는다(줄은 `
+`으로만 나눈다). 줄 끝의 `
+` 또는 `
+`을 뗀 뒤에도 ``이 남아 있는 줄과 `|`의 개수가 정확히 47개가 아닌 줄은 통째로 버린다. 남은 줄은 `|`로 한 번 나누어 `FIELDS`의 여섯 항목만 꺼내 CP949로 바꾼다. 18번 항목은 꺼내지도 문자로 바꾸지도 않는다. `pandas.read_csv`는 쓰지 않는다. 처음 계획은 구분자 수로 거른 줄을 `read_csv`에 넘기는 것이었으나, 줄 안에 ``이 하나 있으면 `read_csv`가 그 자리에서 줄을 둘로 나누어 18번 항목이 결과 열로 밀려 들어가는 것이 검토에서 확인되어 바꾸었다. 줄과 항목의 경계를 정하는 동작을 하나만 두기 위해서다. 읽은 줄 수와 버린 줄 수는 결과의 `attrs["n_lines"]`, `attrs["n_dropped_lines"]`에 숫자로만 남긴다.
 
 **가상 KED 파일**(`synth.py`에 추가, CP949로 씀). 모든 행의 18번 항목에는 `SECRET18`을 넣는다.
 
