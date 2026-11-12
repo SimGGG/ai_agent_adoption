@@ -1,17 +1,19 @@
 """자료 점검(S0) 스크립트.
 
 1단계 `scan`: 연도별 공고 파일을 행 묶음(row group) 단위로 한 번 훑어, 공고 단위 중간 자료와
-작은 집계 자료를 `out_dir`에 쓴다. 공고 원문 열은 처치 판별과 키워드 표현별 공고 수를
-세는 데에만 메모리에서 쓰고, 어떤 파일과 화면 출력에도 남기지 않는다.
+작은 집계 자료, 1단계 기록(`scan_meta.json`: 실행 시각, 코드 시점, 1단계의 결과를 바꾸는 설정 값)을
+`out_dir`에 쓴다. 공고 원문 열은 처치 판별과 키워드 표현별 공고 수를 세는 데에만 메모리에서 쓰고,
+어떤 파일과 화면 출력에도 남기지 않는다.
 
-2단계 `report`: 1단계의 중간 자료로 집계표(`build_tables`), 결과모형 한 번의 학습 시간
-(`time_outcome_model`), 자료 점검 보고서(`write_report`)를 만든다. 집계표에는 공고 번호,
-사업자번호, 공고 원문을 넣지 않는다.
+2단계 `report`: 1단계 기록의 설정 값이 지금 설정과 같은지 확인한 뒤, 1단계의 중간 자료로 집계표
+(`build_tables`), 결과모형 한 번의 학습 시간(`time_outcome_model`), 자료 점검 보고서(`write_report`)를
+만든다. 집계표에는 공고 번호, 사업자번호, 공고 원문을 넣지 않는다.
 
 실행: 저장소 최상위 폴더에서 `python experiments/scripts/s00_data_audit.py scan|report|all`
 """
 import argparse
 import datetime as dt
+import json
 import math
 import subprocess
 import sys
@@ -30,10 +32,22 @@ from lightgbm import LGBMClassifier
 from sklearn.model_selection import GroupKFold
 
 import paths
-from aabundle import classif, ked, rawio, sample, skills, treatment
+from aabundle import classif, ked, rawio, sample, skills, treatment, validate
 
 OUTPUT_NAMES = ("occ_year_all", "base", "treat", "skills_long", "scan_stats", "kw_pattern_hits",
                 "post_start_missing", "sido_other_words")
+# 1단계를 실행한 때, 코드 시점, 1단계의 결과를 바꾸는 설정 항목을 적은 기록(JSON). 위 여덟 파일과 함께 쓰고 지운다.
+META_NAME = "scan_meta"
+# 1단계 기록에 남기는 설정 항목. `scan`이 읽어 결과가 달라지는 항목만이다. 나머지 항목(`data.keco`, `period.unit`,
+# `occupations.min_use_postings`, `sample`, `treatment.definition`, `treatment.keyword_dictionary`, `skills`,
+# `estimation` 등)은 2단계(`report`)에서만 쓰므로, 바꾼 뒤 `report`만 다시 실행하면 된다.
+SCAN_CONFIG_KEYS = ("data.years", "data.codebook", "data.ksic", "data.ked_firm", "period.start", "period.end",
+                    "occupations.keco4", "treatment.text_columns", "treatment.keywords", "treatment.agent_skills",
+                    "salary_band_edges")
+# 결과 파일의 이름을 바꿀 때 PermissionError가 나면 기다렸다가 다시 해 보는 횟수(첫 시도 포함)와 기다리는 시간(초).
+# 구글 드라이브 동기화 프로그램이 파일을 잠깐 잡고 있으면 이름 바꾸기가 실패하기 때문이다.
+RENAME_ATTEMPTS = 5
+RENAME_WAIT_SECONDS = 2.0
 # 시도가 `기타`인 공고의 근무지 첫 낱말 표에 남기는 낱말 수와 낱말의 최대 글자 수
 SIDO_OTHER_WORDS_TOP = 200
 SIDO_OTHER_WORD_MAX_CHARS = 20
@@ -135,6 +149,51 @@ def _part_path(path: Path) -> Path:
     return path.with_name(path.name + ".part")
 
 
+def _replace_with_retry(src: Path, dst: Path) -> None:
+    """`src`의 이름을 `dst`로 바꾼다. PermissionError가 나면 `RENAME_WAIT_SECONDS`초 기다렸다가 다시 하고,
+    `RENAME_ATTEMPTS`번 모두 실패하면 마지막 예외를 그대로 낸다."""
+    for attempt in range(1, RENAME_ATTEMPTS + 1):
+        try:
+            src.replace(dst)
+            return
+        except PermissionError:
+            if attempt == RENAME_ATTEMPTS:
+                raise
+            time.sleep(RENAME_WAIT_SECONDS)
+
+
+def _now_iso() -> str:
+    """지금 시각(이 컴퓨터의 시간대, 초 단위)을 ISO 형식으로 돌려준다."""
+    return dt.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _json_value(value):
+    """설정 값을 JSON으로 썼다가 읽은 값으로 바꾼다. 기록한 값과 지금 값을 같은 형태로 비교하기 위해서다."""
+    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def _config_at(cfg: dict, key: str):
+    d = cfg
+    for part in key.split("."):
+        d = d[part]
+    return d
+
+
+def _scan_config(cfg: dict) -> dict:
+    """설정에서 1단계의 결과를 바꾸는 항목(`SCAN_CONFIG_KEYS`)만 {항목 이름: 값}으로 뽑는다."""
+    return {key: _json_value(_config_at(cfg, key)) for key in SCAN_CONFIG_KEYS}
+
+
+def _differences(recorded, current, key: str) -> list[str]:
+    """두 값이 다른 곳의 항목 이름을 돌려준다. 둘 다 사전이면 안쪽 항목까지 내려가 이름을 `.`으로 잇는다."""
+    if isinstance(recorded, dict) and isinstance(current, dict):
+        out = []
+        for k in list(recorded) + [k for k in current if k not in recorded]:
+            out += _differences(recorded.get(k), current.get(k), f"{key}.{k}")
+        return out
+    return [] if recorded == current else [key]
+
+
 def _empty_frame(schema: pa.Schema) -> pd.DataFrame:
     return pd.DataFrame({f.name: pd.Series([], dtype=f.type.to_pandas_dtype()) for f in schema})
 
@@ -159,19 +218,23 @@ def _post_start_counts(raw: pd.DataFrame, in_occ: np.ndarray, has_use: np.ndarra
 
 
 def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
-    """원자료를 한 번 훑어 중간 자료 여덟 파일(`OUTPUT_NAMES`)을 `out_dir`에 쓰고 {이름: 경로}를 돌려준다.
+    """원자료를 한 번 훑어 중간 자료 여덟 파일(`OUTPUT_NAMES`)과 1단계 기록(`scan_meta.json`)을 `out_dir`에 쓰고
+    {이름: 경로}를 돌려준다.
 
     `post_start_missing`은 공고 파일의 모든 공고를 파일 연도 × 수집 사이트별로 세어 게시일이 없는 공고 수를
     적은 표이고, `sido_other_words`는 `base`에 들어간 공고 가운데 시도가 `기타`인 공고의 근무지 첫 낱말
     (`sample.region_first_word`, 20자까지)별 공고 수를 많은 순으로 200개까지 적은 표이다. 근무지 열 자체는
-    `base`에 쓰지 않는다.
+    `base`에 쓰지 않는다. `scan_meta.json`에는 실행을 시작하고 끝낸 시각, git 커밋, git에 기록된 파일에 커밋하지
+    않은 변경이 있었는지, 설정 가운데 `SCAN_CONFIG_KEYS` 항목의 값만 적는다(공고 단위 값은 적지 않는다).
 
-    입력을 확인한 뒤 훑기 전에, `out_dir`에 있는 이 함수의 결과 파일 여덟 개와 그 `.part` 파일을 지운다
-    (폴더의 다른 파일은 건드리지 않는다). 각 파일은 먼저 `.part`가 붙은 이름으로 쓰고, 모든 연도를 끝까지
-    처리한 뒤에 정해진 이름으로 바꾼다. 이름 바꾸기까지 어느 단계에서든 멈추면 이번 실행의 결과 파일과
-    `.part` 파일을 모두 지우고 예외를 다시 낸다. 그래서 `out_dir`에 남은 결과 파일은 끝까지 처리된 한 번의
-    실행에서 나온 것뿐이다.
+    설정을 확인하고(`validate.validate_config`) 입력을 확인한 뒤 훑기 전에, `out_dir`에 있는 이 함수의 결과 파일
+    아홉 개와 그 `.part` 파일을 지운다(폴더의 다른 파일은 건드리지 않는다). 각 파일은 먼저 `.part`가 붙은
+    이름으로 쓰고, 모든 연도를 끝까지 처리한 뒤에 정해진 이름으로 바꾼다(PermissionError가 나면 몇 번 다시
+    해 본다). 이름 바꾸기까지 어느 단계에서든 멈추면 이번 실행의 결과 파일과 `.part` 파일을 모두 지우고
+    예외를 다시 낸다. 그래서 `out_dir`에 남은 결과 파일은 끝까지 처리된 한 번의 실행에서 나온 것뿐이다.
     """
+    validate.validate_config(cfg)
+    started = _now_iso()
     root, out_dir = Path(root), Path(out_dir)
     years = [int(y) for y in cfg["data"]["years"]]
     postings_dir = root / "data" / "postings"
@@ -193,6 +256,7 @@ def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
     labelled = [("strict", p) for p in kw_cfg["strict"]] + [("broad_extra", p) for p in kw_cfg["broad_extra"]]
 
     out = {name: out_dir / f"{name}.parquet" for name in OUTPUT_NAMES}
+    out[META_NAME] = out_dir / f"{META_NAME}.json"
     parts = {name: _part_path(p) for name, p in out.items()}
 
     def remove_outputs():
@@ -326,8 +390,13 @@ def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
             with rawio.parquet_writer(parts[name], schema) as w:
                 w.write_table(_to_table(df, schema))
 
-        for name in OUTPUT_NAMES:
-            parts[name].replace(out[name])
+        meta = {"scan_started": started, "scan_finished": _now_iso(), "git_commit": _git_commit(),
+                "git_uncommitted_changes": _git_uncommitted_changes(), "config": _scan_config(cfg)}
+        # 같은 폴더의 parquet 파일을 쓸 때 `data` 폴더 아래가 아닌지 이미 확인했다
+        parts[META_NAME].write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        for name in out:
+            _replace_with_retry(parts[name], out[name])
     except BaseException:
         for w in writers.values():
             w.close()
@@ -340,7 +409,7 @@ def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
 # 2단계: 집계표, 학습 시간 측정, 보고서
 # ---------------------------------------------------------------------------
 
-# 희소 필터 기준별로 남는 숙련 수를 보기 위한 격자(과제 9 지시서의 값). 분석에 쓰는 기준은
+# 희소 필터 기준별로 남는 숙련 수를 보기 위한 격자(출현율 기준 세 값 × 처치 공고 수 기준 세 값의 모든 조합). 분석에 쓰는 기준은
 # config.yaml의 skills.sparse_filter에 있고, 그 값도 격자에 더한다.
 SPARSE_GRID_MIN_RATE = (0.0005, 0.001, 0.002)
 SPARSE_GRID_MIN_TREATED = (10, 30, 50)
@@ -366,11 +435,37 @@ _TIMING_BASE_COLUMNS = list(dict.fromkeys(["posting_id", "bzno", "n_skills", *_E
 
 
 def _require_interim(s0_dir: Path) -> None:
-    """1단계의 중간 자료 여덟 파일이 모두 있는지 확인한다. 없으면 없는 파일 이름을 적은 예외를 낸다."""
-    missing = [f"{n}.parquet" for n in OUTPUT_NAMES if not (s0_dir / f"{n}.parquet").is_file()]
+    """1단계의 중간 자료 여덟 파일과 1단계 기록이 모두 있는지 확인한다. 없으면 없는 파일 이름을 적은 예외를 낸다."""
+    names = [f"{n}.parquet" for n in OUTPUT_NAMES] + [f"{META_NAME}.json"]
+    missing = [n for n in names if not (s0_dir / n).is_file()]
     if missing:
         raise FileNotFoundError(
             f"자료 점검 중간 자료가 없습니다: {', '.join(missing)} (찾은 위치: {s0_dir}). 먼저 scan 명령을 실행해야 합니다.")
+
+
+def _read_scan_meta(s0_dir: Path) -> dict:
+    """1단계 기록(`scan_meta.json`)을 읽는다. 읽을 수 없거나 필요한 내용이 없으면 scan을 다시 하라는 예외를 낸다."""
+    path = s0_dir / f"{META_NAME}.json"
+    try:
+        meta = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f"{path.name}을 읽을 수 없습니다({type(e).__name__}). scan 명령을 다시 실행해야 합니다.") from None
+    if not isinstance(meta, dict) or not isinstance(meta.get("config"), dict):
+        raise RuntimeError(f"{path.name}에 설정 기록(config)이 없습니다. scan 명령을 다시 실행해야 합니다.")
+    return meta
+
+
+def _check_scan_config(cfg: dict, meta: dict) -> None:
+    """1단계 기록의 설정 값과 지금 설정을 비교한다. 다르면 다른 항목을 모두 적고 scan을 다시 하라는 예외를 낸다."""
+    recorded = meta["config"]
+    current = _scan_config(cfg)
+    diff = []
+    for key in list(recorded) + [k for k in current if k not in recorded]:
+        diff += _differences(recorded.get(key), current.get(key), key)
+    if diff:
+        raise RuntimeError(
+            "중간 자료를 만들 때(scan)의 설정과 지금 설정이 다른 항목이 있습니다: " + ", ".join(diff)
+            + ". 이 항목은 중간 자료의 내용을 바꾸므로 scan 명령을 다시 실행해야 합니다.")
 
 
 def _keyword_col(cfg: dict) -> str:
@@ -592,9 +687,26 @@ def _t04_bzno_ked_by_treatment(base: pd.DataFrame, flags: pd.DataFrame) -> pd.Da
     return g[["has_use", "n", "n_has_bzno", "has_bzno_rate", "n_ked_matched", "ked_matched_rate"]]
 
 
+def _t03e_no_outcome_skill(long: pd.DataFrame, flags: pd.DataFrame, alive: np.ndarray,
+                           agent_codes: set[str]) -> pd.DataFrame:
+    """제외 규칙 네 단계를 통과한 공고 가운데, AI 에이전트 숙련코드를 빼면 숙련이 하나도 남지 않는 공고 수."""
+    outcome = skills.drop_codes(long[["pos", "skill_code"]], agent_codes)
+    has_outcome = np.zeros(len(alive), dtype=bool)
+    has_outcome[outcome["pos"].to_numpy()] = True
+    none_left = alive & ~has_outcome
+    rows = []
+    for group in ("전체", "has_use", "has_dev", "treat_code"):
+        member = alive if group == "전체" else alive & flags[group].to_numpy(dtype=bool)
+        rows.append({"group": group, "n": int(member.sum()), "n_no_outcome_skill": int((member & none_left).sum())})
+    out = pd.DataFrame(rows)
+    out["no_outcome_skill_rate"] = _rate(out["n_no_outcome_skill"], out["n"])
+    return out
+
+
 def _t04b_ked_lines(ked_firm: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame({"n_lines": [int(ked_firm.attrs["n_lines"])],
                          "n_dropped_lines": [int(ked_firm.attrs["n_dropped_lines"])],
+                         "n_masked_values": [int(ked_firm.attrs["n_masked_values"])],
                          "n_firms": [len(ked_firm)]})
 
 
@@ -734,8 +846,10 @@ def build_tables(cfg: dict, root: Path, s0_dir: Path) -> dict[str, pd.DataFrame]
     각 표는 `s0_dir/tables/{표 이름}.csv`(utf-8-sig)로도 쓰고, 그 경로를 표의 `attrs["csv_path"]`에 둔다.
     표에는 집계값만 넣는다(공고 번호, 사업자번호, 공고 원문은 넣지 않는다).
     """
+    validate.validate_config(cfg)
     root, s0_dir = Path(root), Path(s0_dir)
     _require_interim(s0_dir)
+    _check_scan_config(cfg, _read_scan_meta(s0_dir))
     codebook = skills.load_codebook(root / cfg["data"]["codebook"])
     codes = treatment.agent_skill_codes(codebook, cfg)
     keco = classif.load_keco(root / cfg["data"]["keco"])
@@ -766,6 +880,7 @@ def build_tables(cfg: dict, root: Path, s0_dir: Path) -> dict[str, pd.DataFrame]
         "t03b_sparse_filter_grid": _t03b_sparse_filter_grid(long, treat, alive, codes["dev"] | codes["use"], cfg),
         "t03c_skills_by_source_column": _t03c_skills_by_source_column(long, codebook),
         "t03d_match_stats": stats[["year", "n_tokens", "n_unmatched", "n_length_mismatch_rows"]].copy(),
+        "t03e_no_outcome_skill": _t03e_no_outcome_skill(long, flags, alive, codes["dev"] | codes["use"]),
         "t04_bzno_ked_by_treatment": _t04_bzno_ked_by_treatment(base, flags),
         "t04b_ked_lines": ked_lines,
         "t05_source": _t05_source(base, flags),
@@ -807,10 +922,12 @@ def time_outcome_model(base: pd.DataFrame, treat: pd.DataFrame, long: pd.DataFra
     대상은 제외 규칙을 모두 적용한 공고 가운데 설정의 처치 정의로 처치 공고(1)나 비교 공고(0)인 공고이다.
     결과변수는 희소 필터(설정의 기준)를 통과한 숙련 가운데 가장 많은 공고에 나온 숙련의 보유 여부이고,
     통과한 숙련이 없으면 전체에서 가장 많이 나온 숙련을 쓴다. 희소 필터의 대상 공고와 처치 공고는
-    `t03b_sparse_filter_grid`와 같은 함수(`_sparse_filter_sample`)로 정한다. 기업(`bzno`)으로 나눈 첫 번째 분할의
-    학습 쪽에서 비교 공고만으로 한 번 학습한다. `long`에서 AI 에이전트 숙련코드는 부르는 쪽이 미리 뺀다.
+    `t03b_sparse_filter_grid`와 같은 함수(`_sparse_filter_sample`)로 정한다. 교차적합(자료를 여러 묶음으로 나누어,
+    한 묶음의 예측값을 나머지 묶음으로 학습한 모형으로 구하는 방법)에서 나눈 묶음 하나를 폴드라고 한다. 기업
+    (`bzno`)으로 나눈 폴드 가운데 첫 번째 폴드를 뺀 나머지(학습 쪽)에서 비교 공고만으로 한 번 학습한다.
+    `long`에서 AI 에이전트 숙련코드는 부르는 쪽이 미리 뺀다.
 
-    처치 공고가 없거나, 비교 공고의 기업 수가 겹 수보다 적거나, 학습할 공고가 없거나 결과변수가 한 값뿐이면
+    처치 공고가 없거나, 비교 공고의 기업 수가 폴드 수보다 적거나, 학습할 공고가 없거나 결과변수가 한 값뿐이면
     측정하지 않고 `seconds`와 `est_total_hours`를 None으로 둔다.
     """
     est = cfg["estimation"]
@@ -883,7 +1000,8 @@ REPORT_SECTIONS = [
      ["t02a_treated_by_period", "t02b_treated_by_occ"]),
     (3, "공고당 숙련 수의 분포와 숙련별 출현율 (희소 필터 기준별 남는 숙련 수), 숙련 열별 숙련 수, "
         "숙련명으로 최종판 코드를 찾지 못한 숙련 수",
-     ["t03a_skills_per_posting", "t03b_sparse_filter_grid", "t03c_skills_by_source_column", "t03d_match_stats"]),
+     ["t03a_skills_per_posting", "t03b_sparse_filter_grid", "t03c_skills_by_source_column", "t03d_match_stats",
+      "t03e_no_outcome_skill"]),
     (4, "처치 여부별 사업자번호 보유 비율과 KED 결합 비율", ["t04_bzno_ked_by_treatment", "t04b_ked_lines"]),
     (5, "연도별 수집 사이트 구성, 사이트별 처치 공고 비율과 숙련 보유 비율", ["t05_source"]),
     (6, "키워드 처치와 숙련코드 처치의 겹침, 두 처치와 `ai_peripheral`의 겹침, AI 에이전트 숙련코드 54개 각각의 "
@@ -902,15 +1020,19 @@ REPORT_SECTIONS = [
 # 절 제목 바로 아래에 싣는 문장. 그 절에서 처음 나오는 용어의 정의이다.
 REPORT_SECTION_INTROS = {
     3: "희소 필터는 출현율이 기준보다 낮거나 처치 공고에서 나온 횟수가 기준보다 적은 숙련을 결과변수에서 빼는 규칙이다.",
-    7: "결과모형은 공고의 특성으로 그 숙련이 공고에 들어 있을 확률을 예측하는 모형이다.",
+    7: ("결과모형은 공고의 특성으로 그 숙련이 공고에 들어 있을 확률을 예측하는 모형이다. 제목의 `미도입 공고`(설계 문서 "
+        "6.6절의 표현)는 이 보고서의 비교 공고와 같은 공고이다."),
 }
-# 보고서 머리에 쓰는 기간 단위(`period.unit`)의 한국어 이름
+# 보고서 머리와 `t02a`의 소제목에 쓰는 기간 단위(`period.unit`)의 한국어 이름
 PERIOD_UNIT_LABELS = {"quarter": "분기", "half": "반기", "year": "연"}
+assert set(PERIOD_UNIT_LABELS) == set(validate.PERIOD_UNITS)
 
 # 보고서에서 이 열의 값마다 따로 나눠 싣는 표. 행이 30개를 넘어 뒤쪽 행이 잘리지 않게 하기 위해서다.
 REPORT_SPLIT = {"t01b_post_start_missing": "level", "t02a_treated_by_period": "unit",
                 "t02b_treated_by_occ": "level", "t05_source": "year", "t06a_overlap": "cross",
                 "t06b_agent_skill_by_year": "kind", "t10b_occ_list_check": "status"}
+# 나눠 실을 때 소제목에 값 대신 쓰는 한국어 이름(값은 뒤에 코드 표시로 붙인다)
+REPORT_SPLIT_LABELS = {"t02a_treated_by_period": PERIOD_UNIT_LABELS}
 # 나눠 실을 때 그 부분에서 값이 하나도 없으면 빼는 열. None이면 모든 열이 대상이다.
 # t06a는 두 교차표의 열이 서로 달라서, t01b는 연도 행에 수집 사이트가 없어서다.
 REPORT_DROP_EMPTY_COLUMNS = {"t06a_overlap": None, "t01b_post_start_missing": ["source"]}
@@ -924,6 +1046,8 @@ _PLAIN_INT_COLUMNS = {"year", "month", "min_treated"}
 _BASE_NOTE = "`base.parquet`의 공고(분석 기간 안, 분석 대상 세분류. 사업자번호와 숙련 제외 전)"
 _ALIVE_NOTE = "제외 규칙 네 단계(분석 기간, 분석 대상 세분류, 사업자번호, 숙련)를 모두 적용한 공고"
 _POST_YEAR = "연도와 기간은 공고 게시일(`post_start`) 기준이다."
+_TREAT_ALL_NOTE = ("`treat_all`은 숙련코드 처치(`treat_code`)와 엄격한 사전의 키워드 처치(`kw_strict`)를 합친 것이며, "
+                   "`treatment.keyword_dictionary`를 무엇으로 정해도 엄격한 사전을 쓴다.")
 
 
 def _table_notes(cfg: dict) -> dict[str, str]:
@@ -948,9 +1072,11 @@ def _table_notes(cfg: dict) -> dict[str, str]:
             "연도·수집 사이트는 게시일이 없는 공고가 있는 사이트만 연도 안에서 그 공고가 많은 순으로 싣는다."),
         "t02a_treated_by_period": (
             "대상: " + _ALIVE_NOTE + ". " + _POST_YEAR + " 처치 정의 열은 그 기간에 해당 표시가 참인 공고 수이다. "
+            + _TREAT_ALL_NOTE + " "
             "자료가 마지막 기간의 도중에 끝나면 마지막 기간의 행에는 그 기간의 일부 달만 들어 있다. 이때 마지막 반기의 "
             "행이 마지막 분기의 행과 같을 수 있다. 마지막 연도의 월별 공고 수는 8절의 `t08_2026_monthly`에 있다."),
-        "t02b_treated_by_occ": "대상: " + _BASE_NOTE + ". `n`은 전체 공고 수, 처치 정의 열은 해당 표시가 참인 공고 수이다.",
+        "t02b_treated_by_occ": ("대상: " + _BASE_NOTE + ". `n`은 전체 공고 수, 처치 정의 열은 해당 표시가 참인 공고 수이다. "
+                                + _TREAT_ALL_NOTE),
         "t03a_skills_per_posting": (
             "대상: " + _BASE_NOTE + " 가운데 숙련이 하나 이상 있는 공고. 공고당 숙련 수는 `skills_long.parquet`의 "
             "공고별 행 수이다."),
@@ -965,15 +1091,25 @@ def _table_notes(cfg: dict) -> dict[str, str]:
             "같은 숙련이 한 공고의 여러 열에 나오면 열마다 한 번씩 센다. `total`은 행 수이다. `domain`은 숙련 설명 "
             "파일의 대분류이다."),
         "t03d_match_stats": (
-            "대상: 공고 파일의 모든 공고. `year`는 공고 파일의 연도이다. `n_tokens`는 숙련 코드 토큰 수, "
-            "`n_unmatched`는 설명 파일의 코드로도 숙련명으로도 최종판 코드를 찾지 못한 토큰 수, "
-            "`n_length_mismatch_rows`는 한 숙련 열에서 코드 개수와 숙련명 개수가 다른 공고 × 열의 수이다."),
+            "대상: 공고 파일의 모든 공고. `year`는 공고 파일의 연도이다. `n_tokens`는 숙련 코드 열의 값을 `|`로 나눠 "
+            "얻은 코드 하나하나(빈 값 제외)의 수, `n_unmatched`는 그 가운데 설명 파일의 코드로도 숙련명으로도 최종판 "
+            "코드를 찾지 못한 코드 수, `n_length_mismatch_rows`는 한 숙련 열에서 코드 칸과 숙련명 칸을 `|`로 나눈 "
+            "조각 수(빈 조각 포함)가 다른 공고 × 열의 수이다."),
+        "t03e_no_outcome_skill": (
+            "대상: " + _ALIVE_NOTE + ". `전체`는 이 공고 모두이고, `has_use`, `has_dev`, `treat_code`는 그 가운데 해당 "
+            "표시가 참인 공고이다. `n_no_outcome_skill`은 숙련이 있어 숙련 없음 단계를 통과했지만, 결과변수에서 빼는 "
+            "AI 에이전트 숙련코드 54개를 빼면 숙련이 하나도 남지 않는 공고 수이고, `no_outcome_skill_rate`는 "
+            "`n_no_outcome_skill / n`이다. 이 공고들은 지금 설정에서는 분석에 남아, 모든 숙련의 결과변수가 0인 공고가 "
+            "된다. 이 공고를 분석에 남길지는 저자가 정한다(`docs/decisions.md` 6.7-17)."),
         "t04_bzno_ked_by_treatment": (
             "대상: " + _BASE_NOTE + ". `has_use`는 생성형 AI 활용 숙련 보유 여부이다. `ked_matched_rate`의 분모는 "
             "사업자번호가 있는 공고 수(`n_has_bzno`)이다."),
         "t04b_ked_lines": (
             "KED 기업 자료 파일의 전체 줄 수, 구분자 수가 맞지 않거나 줄 안에 캐리지 리턴 문자가 있어 버린 줄 수, "
-            "남은 사업자번호 수이다."),
+            "남은 사업자번호 수이다. `n_masked_values`는 버리지 않은 줄에서 읽는 여섯 항목(사업자번호, 설립일, "
+            "정보일자, 기업규모 구분, 기업공개 구분, 벤처 여부) 가운데 주민등록번호와 형태가 같은 값(숫자 13개, 여섯째 숫자 "
+            "뒤에 `-`가 있을 수 있음)이 들어 있어 값을 읽지 않고 결측으로 둔 항목 수이다. 0이 아니면 항목이 밀린 "
+            "줄이 있다는 뜻이다."),
         "t05_source": (
             "대상: " + _BASE_NOTE + ". " + _POST_YEAR + " `share_in_year`는 그 연도 공고 가운데 그 사이트 공고의 "
             "비율이다."),
@@ -1004,7 +1140,7 @@ def _table_notes(cfg: dict) -> dict[str, str]:
             "분위수는 기재된 공고의 `salary_annual_min`(원)이다."),
         "t12_sido_other": (
             "대상: " + _BASE_NOTE + ". `기타`는 근무지에서 시도를 알 수 없는 공고, `결측`은 근무지가 없는 공고이다. "
-            "`전남광주`는 근무지가 `전남광주`나 `전남광주통합특별시`인 공고로, `광주`, `전남`과 따로 센다."),
+            "`전남광주`는 근무지 첫 낱말이 `전남광주`나 `전남광주통합특별시`인 공고로, `광주`, `전남`과 따로 센다."),
         "t12b_sido_other_words": (
             "대상: " + _BASE_NOTE + " 가운데 시도가 `기타`인 공고. 근무지(`region`)의 첫 낱말(첫 쉼표 앞에서 처음 나오는 "
             "공백, `>`, `&` 앞까지, 끝의 `전지역`과 `전체`를 뗀 것, 20자까지)별 공고 수를 많은 순으로 싣는다. "
@@ -1087,7 +1223,9 @@ def _table_block(name: str, df: pd.DataFrame, note: str) -> list[str]:
                 subset = REPORT_DROP_EMPTY_COLUMNS[name]
                 d = d.drop(columns=[c for c in (d.columns if subset is None else subset)
                                     if c in d.columns and d[c].isna().all()])
-            lines += [f"#### `{split}` = {_fmt_cell(value, split)}", ""]
+            labels = REPORT_SPLIT_LABELS.get(name, {})
+            shown = f"{labels[value]} (`{value}`)" if value in labels else _fmt_cell(value, split)
+            lines += [f"#### `{split}` = {shown}", ""]
             lines += part(d) + [""]
     else:
         lines += part(df) + [""]
@@ -1102,14 +1240,18 @@ def _timing_block(timing: dict, cfg: dict) -> list[str]:
         "n_features": "설명 변수 수",
         "seconds": "학습 한 번에 걸린 시간(초)",
         "n_skills_kept": "희소 필터(설정의 기준)를 통과한 숙련 수",
-        "est_total_hours": "전체 추정 시간(시간) = 초 × 겹 수 × 통과한 숙련 수 / 3600",
+        "est_total_hours": "전체 추정 시간(시간) = 초 × 폴드 수 × 통과한 숙련 수 / 3600",
     }
     rows = pd.DataFrame({"key": list(labels), "설명": list(labels.values()),
                          "값": [timing.get(k) for k in labels]})
     lines = [
+        "교차적합(자료를 여러 묶음으로 나누어, 한 묶음의 예측값을 나머지 묶음으로 학습한 모형으로 구하는 방법)에서 "
+        "나눈 묶음 하나를 폴드라고 한다.",
+        "",
         "대상: " + _ALIVE_NOTE + " 가운데 설정의 처치 정의(`" + str(cfg["treatment"]["definition"]) + "`)로 처치 공고나 "
-        "비교 공고인 공고. 기업(`bzno`)으로 나눈 " + str(est["n_folds"]) + "겹 분할의 첫 번째 분할에서 학습 쪽의 비교 "
-        "공고만으로 LightGBM 분류 모형을 한 번 학습했다. 설정: `" + str(est["lgbm"]) + "`, 난수 " + str(est["seed"]) + ". "
+        "비교 공고인 공고. 기업(`bzno`)으로 나눈 폴드 " + str(est["n_folds"]) + "개 가운데 첫 번째 폴드를 뺀 나머지(학습 "
+        "쪽)의 비교 공고만으로 LightGBM 분류 모형을 한 번 학습했다. 설정: `" + str(est["lgbm"]) + "`, 난수 "
+        + str(est["seed"]) + ". "
         "`n_skills_kept`는 3절 `t03b_sparse_filter_grid`에서 `config.yaml`의 기준(`skills.sparse_filter`)에 해당하는 "
         "행의 `n_skills_kept`이다(두 곳이 같은 공고와 같은 처치 공고를 쓴다. 단, `t03b`는 처치 정의를 생성형 AI 활용"
         "(`use`)으로 정해 두었으므로 설정의 처치 정의가 `use`가 아니면 두 값이 다를 수 있다).",
@@ -1118,13 +1260,30 @@ def _timing_block(timing: dict, cfg: dict) -> list[str]:
         "",
     ]
     if timing.get("seconds") is None:
-        lines += ["학습 시간을 재지 않았다. 처치 공고가 없거나, 비교 공고의 기업 수가 겹 수보다 적거나, 학습할 공고가 "
+        lines += ["학습 시간을 재지 않았다. 처치 공고가 없거나, 비교 공고의 기업 수가 폴드 수보다 적거나, 학습할 공고가 "
                   "없거나, 결과변수가 한 값뿐인 경우이다.", ""]
     return lines
 
 
-def write_report(tables: dict, timing: dict, cfg: dict, report_path: Path, commit: str) -> Path:
-    """집계표와 학습 시간 측정 결과로 자료 점검 보고서(마크다운)를 쓰고 경로를 돌려준다. 숫자만 싣는다."""
+def _scan_meta_lines(scan_meta: dict | None) -> list[str]:
+    """보고서 머리에 쓰는 1단계(scan) 실행 정보 두 줄."""
+    if scan_meta is None:
+        return ["- 중간 자료를 만든 1단계(`scan`) 실행: 알 수 없음(1단계 기록을 받지 못함)"]
+    changed = scan_meta.get("git_uncommitted_changes")
+    note = (" (실행할 때 git에 기록된 파일에 커밋하지 않은 변경이 있었다)" if changed is True
+            else " (커밋하지 않은 변경이 있었는지 알 수 없음)" if changed is None else "")
+    return [
+        f"- 중간 자료를 만든 1단계(`scan`) 실행: {scan_meta.get('scan_started')} ~ {scan_meta.get('scan_finished')}",
+        f"- 1단계의 코드 시점(git 커밋): {scan_meta.get('git_commit')}{note}",
+    ]
+
+
+def write_report(tables: dict, timing: dict, cfg: dict, report_path: Path, commit: str,
+                 scan_meta: dict | None = None) -> Path:
+    """집계표와 학습 시간 측정 결과로 자료 점검 보고서(마크다운)를 쓰고 경로를 돌려준다. 숫자만 싣는다.
+
+    `commit`은 보고서를 만드는 지금의 코드 시점이고, `scan_meta`는 중간 자료를 만든 1단계의 기록(`scan_meta.json`)이다.
+    """
     report_path = rawio._check_out_path(report_path)
     notes = _table_notes(cfg)
     k = cfg["treatment"]["keywords"]
@@ -1133,8 +1292,9 @@ def write_report(tables: dict, timing: dict, cfg: dict, report_path: Path, commi
     lines = [
         "# 자료 점검(S0) 보고서",
         "",
-        f"- 실행한 날: {dt.date.today().isoformat()}",
-        f"- 코드 시점(git 커밋): {commit}",
+        f"- 보고서를 만든 날(2단계 `report` 실행): {dt.date.today().isoformat()}",
+        f"- 보고서를 만든 코드 시점(git 커밋): {commit}",
+        *_scan_meta_lines(scan_meta),
         f"- 분석 기간: {cfg['period']['start']} ~ {cfg['period']['end']} (기간 단위: {unit_text})",
         f"- 분석 대상 세분류 수: {len(cfg['occupations']['keco4'])}",
         f"- 키워드 사전은 임시값이다(확정 전). 엄격한 사전 {len(k['strict'])}개, 넓은 사전에 더한 표현 "
@@ -1167,6 +1327,17 @@ def _git_commit() -> str:
     return commit if r.returncode == 0 and commit else GIT_UNKNOWN
 
 
+def _git_uncommitted_changes() -> bool | None:
+    """git에 기록된 파일에 커밋하지 않은 변경이 있으면 True를 돌려준다(git에 없는 새 파일은 보지 않는다).
+    git을 쓸 수 없으면 None을 돌려준다."""
+    try:
+        r = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=paths.ROOT,
+                           capture_output=True, text=True, errors="replace", timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return bool(r.stdout.strip()) if r.returncode == 0 else None
+
+
 def run_report(cfg: dict, root: Path, s0_dir: Path, report_path: Path, commit: str | None = None) -> Path:
     """중간 자료로 집계표를 만들고, 학습 시간을 재고, 보고서를 쓴다."""
     root, s0_dir = Path(root), Path(s0_dir)
@@ -1179,7 +1350,7 @@ def run_report(cfg: dict, root: Path, s0_dir: Path, report_path: Path, commit: s
     long = skills.drop_codes(long, codes["dev"] | codes["use"])  # AI 에이전트 숙련코드는 결과변수가 아니다
     timing = time_outcome_model(base, treat, long, cfg)
     del base, treat, long
-    path = write_report(tables, timing, cfg, report_path, commit or _git_commit())
+    path = write_report(tables, timing, cfg, report_path, commit or _git_commit(), _read_scan_meta(s0_dir))
     print(f"보고서를 썼습니다: {path}", flush=True)
     return path
 

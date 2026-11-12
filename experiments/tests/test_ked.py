@@ -74,3 +74,56 @@ def test_line_counts_are_recorded(synth_data):
     out = ked.extract_ked_firm(synth_data["ked_firm"])
     assert out.attrs["n_lines"] == 10
     assert out.attrs["n_dropped_lines"] == 4
+    assert out.attrs["n_masked_values"] == 0
+
+
+# 아래는 전체 검토 수정에서 더한 시험이다. 18번 항목에는 주민등록번호와 형태만 같은, 0으로만 된 가짜 값을 쓴다.
+FAKE_ID = "000000-0000000"
+
+
+def _shifted_line_keeping_47_delimiters() -> bytes:
+    """18번 앞(5번 항목 안)에 `|`가 둘 더 있고 끝의 두 항목이 없는 줄. 구분자는 47개 그대로이다.
+
+    항목이 두 칸 밀려 18번 값이 `ked_ipo` 자리(20)로, 30번 값이 사업자번호 자리(32)로, 29번 값이 정보일자
+    자리(31)로, 17번 값이 설립일자 자리(19)로 온다.
+    """
+    line = synth._ked_row("1", "20160101", "20230501", extra_at=5, extra_n=2,
+                          overrides={18: FAKE_ID, 17: "20160101", 29: "20230501", 30: "1000000011"})
+    fields = line.rstrip(b"\r\n").split(b"|")
+    return b"|".join(fields[:-2]) + b"\r\n"
+
+
+def test_selected_field_shaped_like_resident_number_is_masked(tmp_path):
+    line = _shifted_line_keeping_47_delimiters()
+    assert line.count(b"|") == 47
+    rows = [synth._ked_row("1000000001", "20100315", "20230501"), line,
+            synth._ked_row("1000000012", "20110101", "20230501", ipo="0000000000000")]
+    path = tmp_path / "ked.txt"
+    path.write_bytes(b"".join(rows))
+
+    out = ked.extract_ked_firm(path)
+    cells = [str(c) for c in out.to_numpy().ravel()]
+    assert not any(FAKE_ID in c or "0000000000000" in c for c in cells)
+    assert out.attrs["n_masked_values"] == 2
+    assert out.attrs["n_dropped_lines"] == 0 and out.attrs["n_lines"] == 3
+    by = out.set_index("bzno")
+    assert pd.isna(by.loc["1000000011", "ked_ipo"]) and pd.isna(by.loc["1000000012", "ked_ipo"])
+    # 10자리 사업자번호와 8자리 날짜는 가리지 않는다
+    assert set(out["bzno"]) == {"1000000001", "1000000011", "1000000012"}
+    assert by.loc["1000000001", "ked_estab_year"] == 2010 and by.loc["1000000011", "ked_estab_year"] == 2016
+    assert by.loc["1000000001", "ked_ipo"] == "N"
+
+
+def test_masking_searches_bytes_once_per_line(tmp_path, monkeypatch):
+    path = tmp_path / "ked.txt"
+    path.write_bytes(b"".join(synth._ked_row(f"10000000{i:02d}", "20100315", "20230501") for i in range(5)))
+    calls = []
+    real = ked._ID_SHAPE
+
+    class Counting:
+        def search(self, data):
+            calls.append(data)
+            return real.search(data)
+    monkeypatch.setattr(ked, "_ID_SHAPE", Counting())
+    ked.extract_ked_firm(path)
+    assert len(calls) == 5 and all(isinstance(c, bytes) for c in calls)

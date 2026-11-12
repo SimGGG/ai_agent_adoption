@@ -47,6 +47,30 @@ def test_select_arms_use_definition(treat):
     assert ids(arm == 0) == ["p03", "p06", "p08", "p10", "p11", "p12"]
     assert ids(arm.isna()) == ["p01", "p07", "p09"]           # 개발 숙련만 있거나 키워드에만 걸린 공고
 
+# 전체 검토 수정에서 더한 시험: 다섯 처치 정의 각각의 처치 공고와 비교 공고(가상 자료 공고 12건)
+_STRICT_COMPARISON = ["p03", "p06", "p08", "p10", "p11", "p12"]
+_BROAD_COMPARISON = ["p03", "p06", "p08", "p10", "p12"]          # p11은 넓은 사전(Claude)에 걸린다
+_ARMS = [
+    ("kw_strict", "all", ["p01", "p02", "p04", "p05", "p07", "p09"], _STRICT_COMPARISON),
+    ("kw_strict", "dev", ["p01", "p05"], _STRICT_COMPARISON),
+    ("kw_strict", "use", ["p02", "p04", "p05"], _STRICT_COMPARISON),
+    ("kw_strict", "keyword", ["p01", "p07", "p09"], _STRICT_COMPARISON),
+    ("kw_strict", "code", ["p01", "p02", "p04", "p05"], _STRICT_COMPARISON),
+    ("kw_broad", "all", ["p01", "p02", "p04", "p05", "p07", "p09", "p11"], _BROAD_COMPARISON),
+    ("kw_broad", "dev", ["p01", "p05"], _BROAD_COMPARISON),
+    ("kw_broad", "use", ["p02", "p04", "p05"], _BROAD_COMPARISON),
+    ("kw_broad", "keyword", ["p01", "p05", "p07", "p09", "p11"], _BROAD_COMPARISON),
+    ("kw_broad", "code", ["p01", "p02", "p04", "p05"], _BROAD_COMPARISON),
+]
+
+@pytest.mark.parametrize("keyword_col, definition, treated, comparison", _ARMS)
+def test_select_arms_every_definition(treat, keyword_col, definition, treated, comparison):
+    arm = treatment.select_arms(treat.reset_index(), definition, keyword_col)
+    arm.index = treat.index
+    assert ids(arm == 1) == treated
+    assert ids(arm == 0) == comparison
+    assert ids(arm.isna()) == sorted(set(treat.index) - set(treated) - set(comparison))
+
 def test_select_arms_comparison_is_same_for_every_definition(treat):
     t = treat.reset_index()
     comps = [set(t.posting_id[(treatment.select_arms(t, d) == 0).fillna(False).to_numpy(dtype=bool)]) for d in treatment.DEFINITIONS]

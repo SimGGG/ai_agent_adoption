@@ -74,6 +74,8 @@ def test_scan_counts_postings_without_post_start_and_other_region_words(synth_da
 
 def test_scan_never_stores_posting_text(synth_data, tmp_path):
     out = load_script().scan(synth_data["cfg"], synth_data["root"], tmp_path / "s0")
+    # 1단계 기록(scan_meta.json, 전체 검토 수정에서 더함)은 parquet가 아니어서 글자로 확인한다
+    assert "에이전트 개발" not in out.pop("scan_meta").read_text(encoding="utf-8")
     for p in out.values():
         df = pd.read_parquet(p)
         assert "detail" not in df.columns and "title" not in df.columns

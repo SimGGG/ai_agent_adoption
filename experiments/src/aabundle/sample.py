@@ -99,7 +99,9 @@ def build_posting_base(raw: pd.DataFrame, ked_firm: pd.DataFrame, ksic_valid: se
     quarter = year.astype("string") + "Q" + dts.dt.quarter.astype("Int64").astype("string")
     start = pd.Timestamp(cfg["period"]["start"])
     end = pd.Timestamp(cfg["period"]["end"])
-    in_period = ((dts >= start) & (dts <= end)).to_numpy(dtype=bool)
+    # 게시일에 시각이 있어도 날짜로 비교한다. 끝 날의 자정 뒤에 게시된 공고도 분석 기간 안이다.
+    days = dts.dt.normalize()
+    in_period = ((days >= start) & (days <= end)).to_numpy(dtype=bool)
 
     bzno = raw["bzno"].astype("string")
     left = pd.DataFrame({"_key": bzno})

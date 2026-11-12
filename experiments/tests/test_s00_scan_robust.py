@@ -78,6 +78,7 @@ def _stale(out_dir):
     out_dir.mkdir(parents=True, exist_ok=True)
     for name in OUT_NAMES:
         pd.DataFrame({"old": [1]}).to_parquet(out_dir / f"{name}.parquet")
+    (out_dir / "scan_meta.json").write_text("{}", encoding="utf-8")   # 전체 검토 수정에서 더한 1단계 기록
     (out_dir / "base.parquet.part").write_bytes(b"old")
     (out_dir / "keep.txt").write_text("다른 파일", encoding="utf-8")
 
@@ -101,20 +102,22 @@ def test_failed_scan_leaves_no_stale_or_partial_files(synth_data, tmp_path, monk
     assert _left(out_dir) == []
     assert (out_dir / "keep.txt").exists()
 
-    # 이름을 바꾸는 도중에 멈추는 경우
+    # 이름을 바꾸는 도중에 멈추는 경우. 전체 검토 수정에서 PermissionError가 나면 같은 파일을 몇 번 다시 바꿔 보게
+    # 했으므로, 세 번째 파일의 이름 바꾸기가 매번 실패하게 한다.
     _stale(out_dir)
     real_replace = pathlib.Path.replace
     calls = []
     def replace_then_fail(self, target):
         calls.append(target)
-        if len(calls) == 3:
+        if target in calls[:-1] or len(set(calls)) == 3:
             raise PermissionError("시험용 이름 바꾸기 실패")
         return real_replace(self, target)
     with monkeypatch.context() as m:
         m.setattr(pathlib.Path, "replace", replace_then_fail)
+        m.setattr(mod, "RENAME_WAIT_SECONDS", 0)
         with pytest.raises(PermissionError):
             mod.scan(synth_data["cfg"], synth_data["root"], out_dir)
-    assert len(calls) == 3
+    assert len(set(calls)) == 3 and len(calls) == 2 + mod.RENAME_ATTEMPTS
     assert _left(out_dir) == []
     assert (out_dir / "keep.txt").exists()
 
@@ -122,5 +125,5 @@ def test_failed_scan_leaves_no_stale_or_partial_files(synth_data, tmp_path, monk
     _stale(out_dir)
     out = mod.scan(synth_data["cfg"], synth_data["root"], out_dir)
     out = mod.scan(synth_data["cfg"], synth_data["root"], out_dir)
-    assert _left(out_dir) == sorted(f"{name}.parquet" for name in OUT_NAMES)
+    assert _left(out_dir) == sorted([f"{name}.parquet" for name in OUT_NAMES] + ["scan_meta.json"])
     assert len(pd.read_parquet(out["base"])) == 10

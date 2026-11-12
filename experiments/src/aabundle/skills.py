@@ -51,18 +51,21 @@ def load_codebook(path: Path) -> pd.DataFrame:
 
 
 def _tokens(raw: pd.DataFrame, column: str) -> pd.DataFrame:
-    """한 열을 `|`로 나눠 공백을 떼고 빈 토큰을 버린 표 `rid, pos, tok`을 돌려준다.
+    """한 열을 `|`로 나눠 공백을 떼고 빈 토큰을 버린 표 `rid, pos, tok, n_raw`를 돌려준다.
 
-    `rid`는 입력 행의 위치(0부터), `pos`는 그 칸 안에서 남은 토큰의 순서이다.
+    `rid`는 입력 행의 위치(0부터), `pos`는 빈 토큰을 버리기 전 그 칸 안에서의 순서(0부터)이다. 그래서 숙련 코드와
+    숙련명을 원래 위치로 짝지을 수 있다. `n_raw`는 그 칸을 `|`로 나눈 조각 수(빈 조각 포함)이다. 빈 토큰만 있는
+    칸은 행이 없다.
     """
     values = raw[column]
     s = pd.Series(values.to_numpy(dtype=object), dtype=object)
     s = s.where(values.notna().to_numpy(), "")
     s = s.astype(str).str.split("|").explode().str.strip()
-    s = s[s != ""]
-    out = pd.DataFrame({"rid": s.index.to_numpy(), "tok": s.to_numpy()})
-    out["pos"] = out.groupby("rid", sort=False).cumcount()
-    return out
+    rid = s.index.to_numpy()
+    pos = s.groupby(level=0, sort=False).cumcount().to_numpy()
+    n_raw = s.groupby(level=0, sort=False).transform("size").to_numpy()
+    keep = (s != "").to_numpy()
+    return pd.DataFrame({"rid": rid[keep], "pos": pos[keep], "tok": s.to_numpy()[keep], "n_raw": n_raw[keep]})
 
 
 def _empty_long(raw: pd.DataFrame) -> pd.DataFrame:
@@ -78,8 +81,9 @@ def explode_skills(raw: pd.DataFrame, codebook: pd.DataFrame) -> tuple[pd.DataFr
 
     한 숙련에 대해 ① 코드가 설명 파일의 `skill_code`에 있으면 그 코드를 쓰고,
     ② 없으면 숙련명이 `skill_name`에 있을 때 그 행의 `skill_code`를 쓰고,
-    ③ 둘 다 아니면 버리고 `n_unmatched`에 센다. 한 공고의 한 열에서 코드 개수와
-    숙련명 개수가 다르면 그 열은 ①만 적용하고 `n_length_mismatch_rows`에 센다.
+    ③ 둘 다 아니면 버리고 `n_unmatched`에 센다. 코드와 숙련명은 칸을 `|`로 나눈 원래 위치로 짝짓는다
+    (빈 토큰을 버리기 전의 위치). 한 공고의 한 열에서 코드 칸과 숙련명 칸을 나눈 조각 수(빈 조각 포함)가
+    다르면 그 열은 ①만 적용하고 `n_length_mismatch_rows`에 센다.
     같은 숙련이 여러 열에 있으면 한 행으로 합치고 `src`에 열 이름을 `+`로 이어 적는다.
     """
     needed = ["posting_id"] + raw_skill_columns()
@@ -100,14 +104,15 @@ def explode_skills(raw: pd.DataFrame, codebook: pd.DataFrame) -> tuple[pd.DataFr
             n_mismatch += int(names_only["rid"].nunique())
             continue
         names = _tokens(raw, f"skills_{kind}_name")
-        n_code = codes.groupby("rid").size()
-        n_name = names.groupby("rid").size()
+        # 개수는 빈 조각까지 센 나눔 조각 수로 비교한다(값이 없거나 빈 토큰만 있는 칸은 0개)
+        n_code = codes.groupby("rid")["n_raw"].first()
+        n_name = names.groupby("rid")["n_raw"].first()
         both = pd.concat([n_code.rename("c"), n_name.rename("n")], axis=1).fillna(0)
         differing = both.index[both["c"] != both["n"]]
         n_mismatch += len(differing)
 
-        usable_names = names[~names["rid"].isin(differing)]
-        merged = codes.merge(
+        usable_names = names.loc[~names["rid"].isin(differing), ["rid", "pos", "tok"]]
+        merged = codes[["rid", "pos", "tok"]].merge(
             usable_names.rename(columns={"tok": "name"}), on=["rid", "pos"], how="left"
         )
         final = merged["tok"].where(

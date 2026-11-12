@@ -1,5 +1,5 @@
 # 원자료와 대용량 산출물
-data/
+/data/
 experiments/outputs/
 
 # 인증키·비밀값

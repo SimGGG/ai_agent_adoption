@@ -75,6 +75,25 @@ def test_period_filter(synth_data):
     b = sample.build_posting_base(raw, ked.extract_ked_firm(synth_data["ked_firm"]), set(), cfg)
     assert (~b.in_period).sum() == 4                     # p01~p04
 
+def test_period_compares_dates_not_times(synth_data):
+    # 전체 검토 수정에서 더한 시험. 게시일에 시각이 있어도 날짜로 분석 기간을 판단한다.
+    cfg = synth_data["cfg"]
+    cfg["period"] = {"start": "2025-07-01", "end": "2025-12-31", "unit": "quarter"}
+    raw = pd.concat(rawio.iter_postings(synth_data["postings_dir"], 2025, sample.RAW_COLUMNS)).reset_index(drop=True)
+    raw = raw.iloc[:4].copy()
+    raw["post_start"] = pd.to_datetime(["2025-12-31 23:59:00", "2025-07-01 00:00:00", "2025-06-30 23:59:59",
+                                        "2026-01-01 00:00:00"])
+    b = sample.build_posting_base(raw, ked.extract_ked_firm(synth_data["ked_firm"]), set(), cfg)
+    assert b["in_period"].tolist() == [True, True, False, False]
+
+def test_apply_exclusions_keeps_input_index_labels(base, synth_data):
+    # 전체 검토 수정에서 더한 시험. 스크립트의 `_exclusions`는 남은 행의 번호표로 위치를 찾는다.
+    b = base.reset_index()
+    b.index = b.index * 10 + 3
+    kept, _ = sample.apply_exclusions(b, synth_data["cfg"])
+    assert kept.index.tolist() == b.index[b["in_period"] & b["in_occ"] & b["has_bzno"]].tolist()
+    assert kept.index.tolist() == [3, 13, 23, 43, 53, 83, 93, 103, 113]
+
 def test_missing_bzno_never_joins(synth_data):
     raw = pd.concat(rawio.iter_postings(synth_data["postings_dir"], 2025, sample.RAW_COLUMNS))
     k = ked.extract_ked_firm(synth_data["ked_firm"])

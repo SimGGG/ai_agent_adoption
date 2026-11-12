@@ -45,7 +45,7 @@
 
 ## 환경 만들기
 
-conda 가상환경 이름은 `aabundle`이다. 저장소 최상위 폴더에서 PowerShell로 다음 세 명령을 순서대로 실행한다. 이 형태(`conda run ... python -m pip`)는 PowerShell에서만 확인했고, Git Bash에서는 `conda run`이 가상환경이 아닌 다른 파이썬을 찾는 경우가 있어 쓰지 않는다. `aabundle`이 이미 있으면 새로 만들지 말고 연구자에게 알린다.
+conda 가상환경 이름은 `aabundle`이다. 저장소 최상위 폴더에서 PowerShell로 다음 네 줄(환경 변수 설정 한 줄과 명령 세 줄)을 순서대로 실행한다. 이 형태(`conda run ... python -m pip`)는 PowerShell에서만 확인했고, Git Bash에서는 `conda run`이 가상환경이 아닌 다른 파이썬을 찾는 경우가 있어 쓰지 않는다. `aabundle`이 이미 있으면 새로 만들지 말고 연구자에게 알린다.
 
 ```powershell
 $env:PYTHONNOUSERSITE = "1"
@@ -54,9 +54,9 @@ conda run -n aabundle python -m pip install --no-deps --no-build-isolation -e .
 conda env export -n aabundle --no-builds > environment.lock.yml
 ```
 
-첫 줄은 사용자 폴더(`AppData\Roaming\Python`)에 설치된 패키지가 가상환경의 패키지를 가려 설치와 시험이 실패하는 것을 막는다(`tools/py.ps1`에는 이미 들어 있다). 세 번째 명령은 PowerShell 5.1에서 파일을 UTF-16으로 저장하므로, 파일을 다시 쓸 때는 UTF-8(BOM 없음)로 저장한다.
+첫 줄은 사용자 폴더(`AppData\Roaming\Python`)에 설치된 패키지가 가상환경의 패키지를 가려 설치와 시험이 실패하는 것을 막는다(`tools/py.ps1`에는 이미 들어 있다). 마지막 줄(`conda env export`)은 PowerShell 5.1에서 파일을 UTF-16으로 저장하므로, 파일을 다시 쓸 때는 UTF-8(BOM 없음)로 저장한다.
 
-세 번째 명령으로 만든 `environment.lock.yml`은 다음과 같이 고친다.
+마지막 줄로 만든 `environment.lock.yml`은 다음과 같이 고친다.
 
 - `prefix:`로 시작하는 줄을 지운다(사용자 폴더 경로가 들어 있다).
 - `channels:`의 `defaults` 줄을 지운다(conda가 암묵적으로 더한 것이며 `environment.yml`에 없다).
@@ -101,9 +101,20 @@ PYTHONNOUSERSITE=1 PYTHONUTF8=1 "$(conda info --base)/envs/aabundle/python.exe" 
 ./tools/py.ps1 experiments/scripts/s00_data_audit.py all
 ```
 
-- `scan`: 연도별 공고 파일 여섯 개와 KED 기업 자료를 한 번 읽어 중간 자료 여덟 파일(`base`, `treat`, `skills_long`, `occ_year_all`, `scan_stats`, `kw_pattern_hits`, `post_start_missing`, `sido_other_words`, 모두 parquet)을 `experiments/outputs/s0/`에 쓴다.
-- `report`: 중간 자료로 집계표(CSV)를 `experiments/outputs/s0/tables/`에 쓰고, 결과모형(공고의 특성으로 그 숙련이 공고에 들어 있을 확률을 예측하는 모형) 한 번의 학습 시간을 잰 뒤 `docs/s0-data-audit.md`를 쓴다.
+- `scan`: 연도별 공고 파일 여섯 개, 숙련 설명 파일, 산업 분류표(`KSIC10.xlsx`), KED 기업 자료를 한 번 읽어 중간 자료 여덟 파일(`base`, `treat`, `skills_long`, `occ_year_all`, `scan_stats`, `kw_pattern_hits`, `post_start_missing`, `sido_other_words`, 모두 parquet)과 1단계 기록 `scan_meta.json`(실행한 시각, git 커밋, 커밋하지 않은 변경이 있었는지, 아래 표의 `scan`을 다시 해야 하는 설정 항목의 값)을 `experiments/outputs/s0/`에 쓴다.
+- `report`: 중간 자료와 함께 숙련 설명 파일, 직종 분류표(`KECO2025.xlsx`), KED 기업 자료(`ked.extract_ked_firm`으로 줄 수와 기업 수를 센다)를 읽어 집계표(CSV)를 `experiments/outputs/s0/tables/`에 쓰고, 결과모형(공고의 특성으로 그 숙련이 공고에 들어 있을 확률을 예측하는 모형) 한 번의 학습 시간을 잰 뒤 `docs/s0-data-audit.md`를 쓴다. 먼저 `scan_meta.json`의 설정 값과 지금 `config.yaml`을 비교해, 다른 항목이 있으면 그 항목을 모두 적고 멈춘다.
 - `all`: `scan` 다음에 `report`를 실행한다.
+
+두 명령 모두 일을 시작하기 전에 `config.yaml`의 값이 쓸 수 있는 형태인지 확인한다(`aabundle/validate.py`). 예를 들어 `occupations.keco4`의 코드를 따옴표 없이 적으면 멈춘다.
+
+`config.yaml`을 고친 뒤 다시 실행할 명령은 고친 항목에 따라 다르다.
+
+| 다시 실행할 명령 | 설정 항목 |
+|---|---|
+| `scan`부터(`all`) | `data.years`, `data.codebook`, `data.ksic`, `data.ked_firm`, `period.start`, `period.end`, `occupations.keco4`, `treatment.text_columns`, `treatment.keywords`, `treatment.agent_skills`, `salary_band_edges` |
+| `report`만 | `data.keco`, `period.unit`, `occupations.min_use_postings`, `sample.require_bzno`, `treatment.definition`, `treatment.keyword_dictionary`, `skills`, `estimation` |
+
+나머지 항목(`occ_group` 등)은 자료 점검에서 쓰지 않는다.
 
 2026-11-12에 실제 자료로 `all`을 실행한 시간은 약 87분이었다(`scan` 약 83분, `report` 약 4분). `scan`에서 연도별 공고 파일을 읽는 데 걸린 시간은 2021년 819초, 2022년 1,021초, 2023년 819초, 2024년 867초, 2025년 772초, 2026년 691초이다. 집계표만 다시 만들 때는 `report`만 실행한다(중간 자료가 있어야 한다).
 
@@ -112,5 +123,5 @@ PYTHONNOUSERSITE=1 PYTHONUTF8=1 "$(conda info --base)/envs/aabundle/python.exe" 
 1. 환경 만들기와 시험 실행
 2. 자료 점검(S0)을 실행하고 보고서를 읽는다.
 3. 보고서를 보고 확정 사항을 `docs/decisions.md`에 적고 `experiments/config.yaml`에 반영한다.
-4. 단계별 스크립트(S1~S12)를 `experiments/scripts/`에서 순서대로 실행한다.
-5. 확정된 표와 그림을 `experiments/scripts/export_to_paper.py`로 `paper/exhibits/`에 내보낸다.
+4. 단계별 스크립트(S1~S12)를 `experiments/scripts/`에서 순서대로 실행한다(두 번째 계획에서 추가. 지금은 `s00_data_audit.py`만 있다).
+5. 확정된 표와 그림을 `experiments/scripts/export_to_paper.py`로 `paper/exhibits/`에 내보낸다(두 번째 계획에서 추가).

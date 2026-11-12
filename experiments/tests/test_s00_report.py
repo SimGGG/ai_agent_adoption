@@ -57,8 +57,10 @@ def test_report_has_all_sections_and_no_text(synth_data, tmp_path):
 def test_ked_line_counts_and_csv(synth_data, tmp_path):
     _, t = run(synth_data, tmp_path)
     k = t["t04b_ked_lines"]
-    assert list(k.columns) == ["n_lines", "n_dropped_lines", "n_firms"] and len(k) == 1
+    # n_masked_values는 전체 검토 수정에서 더한 열이다
+    assert list(k.columns) == ["n_lines", "n_dropped_lines", "n_masked_values", "n_firms"] and len(k) == 1
     assert k.loc[0, "n_lines"] == 10 and k.loc[0, "n_dropped_lines"] == 4 and k.loc[0, "n_firms"] == 4
+    assert k.loc[0, "n_masked_values"] == 0
     for name in t:
         csv = pd.read_csv(tmp_path / "s0" / "tables" / f"{name}.csv", encoding="utf-8-sig", dtype=str)
         cells = csv.fillna("").to_numpy().ravel().tolist()
@@ -213,3 +215,37 @@ def test_report_wording(synth_data, tmp_path):
     assert text.index("## 7. ") < text.index("결과모형은 공고의 특성으로") < text.index("## 8. ")
     notes = s00._table_notes(synth_data["cfg"])
     assert "8절" in notes["t02a_treated_by_period"] and "n_skills_kept" in "".join(s00._timing_block(_NO_TIMING, synth_data["cfg"]))
+
+
+# 아래는 전체 검토 수정에서 더한 시험이다.
+
+def test_postings_with_only_agent_skill_codes(synth_data, tmp_path):
+    # 네 단계를 통과한 공고 p01 p02 p03 p05 p09 p11 p12 가운데 p05는 숙련이 AI 에이전트 숙련코드(IT-05-0413,
+    # IT-05-0410)뿐이어서, 54개 코드를 빼면 결과 숙련이 하나도 없다.
+    s00, t = run(synth_data, tmp_path)
+    e = t["t03e_no_outcome_skill"]
+    assert list(e.columns) == ["group", "n", "n_no_outcome_skill", "no_outcome_skill_rate"]
+    g = e.set_index("group")
+    assert g.index.tolist() == ["전체", "has_use", "has_dev", "treat_code"]
+    assert g["n"].tolist() == [7, 2, 2, 3] and g["n_no_outcome_skill"].tolist() == [1, 1, 1, 1]
+    assert g.loc["전체", "no_outcome_skill_rate"] == pytest.approx(1 / 7)
+    text = s00.write_report(t, _NO_TIMING, synth_data["cfg"], tmp_path / "report.md", commit="c").read_text(encoding="utf-8")
+    assert text.index("### `t03d_match_stats`") < text.index("### `t03e_no_outcome_skill`") < text.index("## 4. ")
+    assert "저자가 정한다" in s00._table_notes(synth_data["cfg"])["t03e_no_outcome_skill"]
+
+
+def test_report_wording_after_final_review(synth_data, tmp_path):
+    s00, t = run(synth_data, tmp_path)
+    text = s00.write_report(t, _NO_TIMING, synth_data["cfg"], tmp_path / "report.md", commit="c").read_text(encoding="utf-8")
+    assert "겹" not in text.replace("겹치", "").replace("겹침", "")
+    sec7 = text[text.index("## 7. "):text.index("## 8. ")]
+    assert "폴드" in sec7 and sec7.index("교차적합(") < sec7.index("폴드")
+    assert "미도입 공고" not in sec7.split("\n", 1)[1].replace("제목의 `미도입 공고`", "")
+    assert "#### `unit` = 연 (`year`)" in text and "#### `unit` = 분기 (`quarter`)" in text
+    assert "#### `unit` = 반기 (`half`)" in text
+    notes = s00._table_notes(synth_data["cfg"])
+    assert "토큰" not in notes["t03d_match_stats"]
+    assert "근무지 첫 낱말이 `전남광주`나 `전남광주통합특별시`인 공고" in notes["t12_sido_other"]
+    for name in ("t02a_treated_by_period", "t02b_treated_by_occ"):
+        assert "keyword_dictionary" in notes[name] and "treat_all" in notes[name]
+    assert "n_masked_values" in notes["t04b_ked_lines"]
