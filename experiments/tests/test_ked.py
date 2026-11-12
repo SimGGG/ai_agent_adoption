@@ -55,3 +55,22 @@ def test_small_chunks_give_same_result(synth_data):
 def test_missing_file_names_the_file(tmp_path):
     with pytest.raises(FileNotFoundError, match="nope.txt"):
         ked.extract_ked_firm(tmp_path / "nope.txt")
+
+
+def test_shifted_and_split_rows_never_reach_output(synth_data):
+    out = ked.extract_ked_firm(synth_data["ked_firm"])
+    assert not out.astype(str).apply(lambda c: c.str.contains("SECRET18")).any().any()
+    assert not {"1000000009", "1000000010", "9999999999"} & set(out["bzno"])
+
+
+def test_line_filter_rejects_exactly_the_bad_rows(synth_data):
+    with open(synth_data["ked_firm"], "rb") as f:
+        accepted = [ked._split_line(raw) is not None for raw in f]
+    # 행 6, 8(구분자 49개), 행 9(구분자 49개), 행 10(단독 줄바꿈 문자)만 버린다.
+    assert accepted == [True, True, True, True, True, False, True, False, False, False]
+
+
+def test_line_counts_are_recorded(synth_data):
+    out = ked.extract_ked_firm(synth_data["ked_firm"])
+    assert out.attrs["n_lines"] == 10
+    assert out.attrs["n_dropped_lines"] == 4

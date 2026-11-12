@@ -162,16 +162,19 @@ KED_SIZE_LATEST = "L2"
 KED_SIZE_OLD = "S1"
 
 
-def _ked_row(bzno, estab, info_date, size="M1", ipo="N", venture="Y", extra_at=None) -> bytes:
+def _ked_row(bzno, estab, info_date, size="M1", ipo="N", venture="Y", extra_at=None,
+             extra_n=1, overrides=None) -> bytes:
     """48개 항목을 `|`로 이은 한 줄을 CP949 바이트로 돌려준다. 18번 항목은 항상 `SECRET18`이다.
 
-    `extra_at`을 주면 그 번호의 항목 안에 `|`를 하나 더 넣어 구분자가 48개가 되게 한다.
+    `extra_at`을 주면 그 번호의 항목 안에 `|`를 `extra_n`개 더 넣는다. `overrides`는 {항목 번호: 값}이다.
     """
     f = [f"항목{i:02d}" if i % 2 else f"v{i:02d}" for i in range(48)]
     f[5], f[12], f[18], f[19] = size, venture, "SECRET18", estab
     f[20], f[31], f[32] = ipo, info_date, bzno
+    for i, v in (overrides or {}).items():
+        f[i] = v
     if extra_at is not None:
-        f[extra_at] = f[extra_at] + "|추가"
+        f[extra_at] = f[extra_at] + "|추가" * extra_n
     return ("|".join(f) + "\r\n").encode("cp949")
 
 
@@ -185,6 +188,15 @@ def _write_ked(path: Path) -> None:
         _ked_row("1000000005", "20150101", "20230501", extra_at=5),
         _ked_row("1000000006", "SECRET18", "20230501"),
         _ked_row("1000000008", "20120101", "20230501", extra_at=40),
+        # 행 9: 18번 앞에 `|`가 둘 더 있어 항목이 두 칸 밀린다. 18번 값이 ked_ipo 자리(20)로 오고,
+        # 30번 항목의 값이 사업자번호 자리(32)로 와서 10자리 검사를 통과한다.
+        _ked_row("1", "20160101", "20230501", extra_at=5, extra_n=2,
+                 overrides={29: "20230501", 30: "1000000009"}),
+        # 행 10: 구분자는 47개이지만 6번 항목 안에 줄 끝이 아닌 캐리지 리턴 문자(CR)가 하나 있다.
+        # CR를 줄 끝으로 읽는 도구라면 줄이 둘로 갈라져 둘째 줄의 12번 자리에 18번 값이,
+        # 32번 자리에 38번 값이 온다.
+        _ked_row("1000000010", "20170101", "20230501",
+                 overrides={6: "a\rb", 38: "9999999999"}),
     ]
     path.write_bytes(b"".join(rows))
 
