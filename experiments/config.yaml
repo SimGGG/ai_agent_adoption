@@ -1,0 +1,53 @@
+# 확정 사항을 담는 설정. 값의 근거는 docs/decisions.md와 설계 문서 2장, 6.7절에 있다.
+data:
+  years: [2021, 2022, 2023, 2024, 2025, 2026]
+  codebook: data/postings/ojp_codebook_skill.csv
+  ksic: data/postings/KSIC10.xlsx
+  keco: data/postings/KECO2025.xlsx
+  ked_firm: data/ked/KED5002.txt
+
+period:                      # 설계 문서 6.7절 13번: 자료 점검 뒤 확정. 지금은 자료 전체
+  start: "2021-01-01"
+  end: "2026-12-31"
+  unit: quarter              # proposal.md 10장 2번: 자료 점검 뒤 확정
+
+occupations:                 # 결정 20
+  min_use_postings: 30
+  keco4: ["0122", "0241", "0243", "0261", "0262", "0265", "0271", "0272", "0284", "0292",
+          "0295", "0299", "1320", "1331", "1332", "1333", "1339", "1342", "1351", "1352",
+          "1361", "2143", "2151", "4154", "4155", "4166", "6121", "6154"]
+
+sample:
+  require_bzno: true         # 6.7절 1번 기본값
+
+treatment:
+  text_columns: [detail]     # 6.7절 2번 기본값: 본문만
+  keywords:                  # proposal.md 3.2절의 예시와 저자가 더한 표현(결정 22). 임시값이며 확정 필요
+    strict: ['AI\s*agent', 'AI\s*에이전트', 'agentic', '에이전틱', 'LLM\s*agent', '멀티\s*에이전트', 'multi[- ]?agent']
+    broad_extra: ['자율\s*에이전트', '에이전트\s*오케스트레이션', 'LangChain', 'LangGraph', 'AutoGen', 'CrewAI',
+                  'Claude', '클로드', 'Codex', '코덱스', 'Ollama', '올라마', 'Gemini', '제미나이',
+                  'Deep\s*seek', '딥\s*시크', 'sub[- ]?agent', '서브\s*에이전트']
+    exclude: ['보험\s*에이전트', '여행\s*에이전[트시]', '부동산\s*에이전트', '스포츠\s*에이전트', '에이전시']
+  agent_skills:              # 결정 13, 19
+    v31_prefix: "IT-06-012-"
+    use_suffix: "활용하기"
+    move_to_dev: ["IT-05-0382", "IT-05-0413", "IT-05-0414", "IT-05-0420", "IT-05-0421"]
+    move_to_use: ["IT-05-0396"]
+  definition: use            # 6.7절 11번 기본값. all | dev | use | keyword | code
+  keyword_dictionary: strict
+
+skills:
+  adjacent: []               # 6.7절 3번: 자료 점검 뒤 확정
+  placebo: []                # 결과를 보기 전에 정한다
+  sparse_filter:
+    min_rate: 0.001
+    min_treated: 30
+
+salary_band_edges: []        # proposal.md 10장 12번: 자료 점검 뒤 확정. 단위는 원
+occ_group: keco2             # 6.7절 9번 기본값
+
+estimation:
+  seed: 42
+  n_folds: 5
+  trim: [0.01, 0.99]
+  lgbm: {n_estimators: 300, learning_rate: 0.05, num_leaves: 31}

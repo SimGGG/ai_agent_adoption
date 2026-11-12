@@ -1,0 +1,21 @@
+name: aabundle
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - hatchling
+  - numpy
+  - pandas
+  - pyarrow
+  - scipy
+  - scikit-learn
+  - lightgbm
+  - statsmodels
+  - doubleml
+  - networkx
+  - matplotlib
+  - pyyaml
+  - openpyxl
+  - pytest
+  - jupyterlab

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aabundle"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+# 의존 패키지는 environment.yml에서만 관리한다.
+# pip가 conda 패키지 위에 다른 판을 덮어 설치하지 않게 하기 위해서다.
+dependencies = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["experiments/src/aabundle"]
+
+[tool.pytest.ini_options]
+testpaths = ["experiments/tests"]
+pythonpath = ["experiments", "experiments/tests"]
+markers = ["realdata: data/ 폴더의 실제 자료를 읽는 시험"]
+addopts = "-m 'not realdata'"
