@@ -11,7 +11,7 @@
 3. `data/ked/KED5002.txt`의 19번째 항목(0부터 세면 18번)은 개인사업자의 주민등록번호이다. 이 항목은 읽지 않는다. 화면 출력, 로그, 시험 자료에도 실제 값을 넣지 않는다.
 4. 확정 사항은 `docs/decisions.md`에 먼저 적고 `experiments/config.yaml`에 반영한다.
 5. 설계 문서의 결정 표와 `proposal.md`가 다르면 설계 문서를 따른다.
-6. 파이썬 명령은 저장소 최상위 폴더에서 `./tools/py.ps1`로 실행한다(conda 가상환경 `aabundle`). 예: `./tools/py.ps1 -m pytest -q`. PowerShell이 스크립트 실행을 막거나 Bash에서 실행할 때는 `conda run -n aabundle --no-capture-output python -X utf8 -m pytest -q`처럼 풀어서 쓴다.
+6. 파이썬 명령은 저장소 최상위 폴더에서 PowerShell로 `./tools/py.ps1`을 실행한다(conda 가상환경 `aabundle`). 예: `./tools/py.ps1 -m pytest -q`. PowerShell이 스크립트 실행을 막거나 Git Bash에서 실행할 때는 가상환경의 `python.exe`를 직접 부른다: `PYTHONNOUSERSITE=1 PYTHONUTF8=1 "$(conda info --base)/envs/aabundle/python.exe" -X utf8 -m pytest -q`. Git Bash에서 `conda run`은 가상환경이 아닌 다른 파이썬을 부르므로 쓰지 않는다.
 7. 공고 원문 열(`detail`, `title`)은 처치 판별에서만 읽고, 중간 자료와 보고서에 원문을 저장하지 않는다.
 8. 시험과 가상 자료에서 나온 수치는 연구 결과로 적지 않는다.
 9. 커밋은 한국어로 쓴다. `data/`, `experiments/outputs/`, `test.ipynb`는 커밋하지 않는다.
