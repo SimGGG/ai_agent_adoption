@@ -29,6 +29,7 @@
 │   ├── tests/
 │   └── outputs/              # git 제외
 │       ├── interim/          # 중간 자료
+│       ├── s0/               # 자료 점검의 중간 자료와 집계표(tables/)
 │       └── runs/             # 실행별 결과
 ├── paper/                    # 논문 공간
 │   ├── CLAUDE.md
@@ -94,7 +95,17 @@ PYTHONNOUSERSITE=1 PYTHONUTF8=1 "$(conda info --base)/envs/aabundle/python.exe" 
 
 ## 자료 점검 실행
 
-자료 점검(S0)은 원자료로 공고 수, 처치 공고 수, 숙련 출현율 등을 집계해 `docs/s0-data-audit.md`에 적는 단계이다. 실행 명령은 과제 8~9에서 스크립트를 만든 뒤 이 절에 적는다.
+자료 점검(S0)은 원자료로 공고 수, 처치 공고 수, 숙련 출현율 등을 집계해 `docs/s0-data-audit.md`에 적는 단계이다. 저장소 최상위 폴더에서 다음 명령으로 실행한다.
+
+```powershell
+./tools/py.ps1 experiments/scripts/s00_data_audit.py all
+```
+
+- `scan`: 연도별 공고 파일 여섯 개와 KED 기업 자료를 한 번 읽어 중간 자료 여섯 파일(`base`, `treat`, `skills_long`, `occ_year_all`, `scan_stats`, `kw_pattern_hits`, 모두 parquet)을 `experiments/outputs/s0/`에 쓴다.
+- `report`: 중간 자료로 집계표(CSV)를 `experiments/outputs/s0/tables/`에 쓰고, 결과모형 학습 시간을 잰 뒤 `docs/s0-data-audit.md`를 쓴다.
+- `all`: `scan` 다음에 `report`를 실행한다.
+
+2026-11-12에 실제 자료로 `all`을 실행한 시간은 약 87분이었다(`scan` 약 83분, `report` 약 4분). `scan`에서 연도별 공고 파일을 읽는 데 걸린 시간은 2021년 819초, 2022년 1,021초, 2023년 819초, 2024년 867초, 2025년 772초, 2026년 691초이다. 집계표만 다시 만들 때는 `report`만 실행한다(중간 자료가 있어야 한다).
 
 ## 실행 순서
 
