@@ -12,6 +12,7 @@
 """
 import argparse
 import datetime as dt
+import math
 import subprocess
 import sys
 import time
@@ -868,6 +869,16 @@ def _table_notes(cfg: dict) -> dict[str, str]:
     }
 
 
+def _fmt_small(v: float) -> str:
+    """0이 아니고 절댓값이 100보다 작은 실수를 지수 표기 없이 쓴다.
+
+    소수 넷째 자리까지 쓰되, 절댓값이 작아 유효숫자가 세 자리보다 적게 남으면 세 자리가 남도록 자리를 늘린다
+    (예: 0.00004, 0.00012, 0.00049). 그래서 0이 아닌 값이 `0`으로 보이지 않는다. 끝의 0은 지운다.
+    """
+    decimals = max(4, 2 - math.floor(math.log10(abs(v))))
+    return f"{v:.{decimals}f}".rstrip("0").rstrip(".")
+
+
 def _fmt_cell(v, column: str) -> str:
     if v is None or (not isinstance(v, (str, list, tuple)) and pd.isna(v)):
         s = ""
@@ -881,8 +892,10 @@ def _fmt_cell(v, column: str) -> str:
             s = f"{v:,.0f}"
         elif abs(v) >= 100:
             s = f"{v:,.1f}"
+        elif v == 0:
+            s = "0"
         else:
-            s = f"{v:.4f}".rstrip("0").rstrip(".") if v != 0 else "0"
+            s = _fmt_small(v)
     else:
         s = str(v)
     if column in REPORT_CODE_COLUMNS and s:

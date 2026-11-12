@@ -119,3 +119,14 @@ def test_command_line_report_and_all(synth_data, tmp_path, monkeypatch):
     # 공고 번호(p10은 연봉 10% 분위수의 열 이름과 같아 뺀다)와 사업자번호가 보고서에 없다
     assert not re.search(r"\bp(0[1-9]|11|12)\b", text) and not re.search(r"\b1000000\d{3}\b", text)
     assert (tmp_path / "s0cli" / "tables" / "t01_exclusions.csv").exists()
+
+
+def test_report_numbers_keep_small_rates_and_csv_keeps_full_precision(synth_data, tmp_path):
+    s00, t = run(synth_data, tmp_path)
+    f = lambda v: s00._fmt_cell(v, "has_use_rate")
+    assert f(4e-05) == "0.00004" and f(0.00012) == "0.00012" and f(0.00049) == "0.00049"
+    assert f(0.5) == "0.5" and f(0.0) == "0" and f(1.625) == "1.625" and f(45_000_000.0) == "45,000,000"
+    assert all("e" not in f(v).lower() for v in (4e-05, 1.234e-07, 0.00049))
+    # CSV에는 보고서용으로 줄인 값이 아니라 계산한 값 그대로가 들어간다
+    csv = pd.read_csv(tmp_path / "s0" / "tables" / "t04_bzno_ked_by_treatment.csv", encoding="utf-8-sig")
+    assert csv.loc[csv["has_use"] == False, "ked_matched_rate"].iloc[0] == pytest.approx(5 / 7, rel=1e-12)
