@@ -53,10 +53,43 @@ def _plain(t: pa.DataType) -> pa.DataType:
     return t
 
 
-def _schemas(raw_schema: pa.Schema) -> dict[str, pa.Schema]:
+def _promote(types: list[pa.DataType]) -> pa.DataType | None:
+    """여러 연도의 자료형을 하나로 맞춘다. 맞출 수 없으면 None을 돌려준다.
+
+    null 형식(값이 하나도 없는 열)은 다른 연도의 형식을 따른다. 문자열 계열은 `string`으로,
+    정수와 실수가 섞이면 `float64`로, 너비가 다른 정수만 있으면 `int64`로 맞춘다.
+    """
+    ts = [_plain(t) for t in types if not pa.types.is_null(t)]
+    if all(t == ts[0] for t in ts):
+        return ts[0]
+    if all(pa.types.is_integer(t) or pa.types.is_floating(t) for t in ts):
+        return pa.float64() if any(pa.types.is_floating(t) for t in ts) else _INT
+    return None
+
+
+def _passthrough_types(files: dict) -> dict[str, pa.DataType]:
+    """원자료에서 그대로 옮기는 열의 자료형을 모든 연도 파일의 열 구성으로 정한다(훑기 전에 한 번).
+
+    연도 간에 하나로 맞출 수 없는 열이나 모든 연도에서 null 형식인 열이 있으면, 열 이름과
+    연도별 자료형을 적은 ValueError를 낸다.
+    """
+    out = {}
+    for c in [c for c in sample.BASE_COLUMNS if c not in _BASE_DERIVED_TYPES]:
+        by_year = {y: pf.schema_arrow.field(c).type for y, pf in files.items()}
+        desc = ", ".join(f"{y}년 {t}" for y, t in by_year.items())
+        if all(pa.types.is_null(t) for t in by_year.values()):
+            raise ValueError(f"{c} 열은 모든 연도에서 값이 하나도 없는 형식(null)입니다: {desc}")
+        t = _promote(list(by_year.values()))
+        if t is None:
+            raise ValueError(f"{c} 열의 자료형을 연도 간에 하나로 맞출 수 없습니다: {desc}")
+        out[c] = t
+    return out
+
+
+def _schemas(passthrough: dict[str, pa.DataType]) -> dict[str, pa.Schema]:
     """공고 단위 세 파일의 열 구성을 정한다. 연도나 행 묶음에 따라 형식이 바뀌지 않게 하기 위해서다."""
-    id_type = _plain(raw_schema.field("posting_id").type)
-    base = [(c, _BASE_DERIVED_TYPES[c] if c in _BASE_DERIVED_TYPES else _plain(raw_schema.field(c).type))
+    id_type = passthrough["posting_id"]
+    base = [(c, _BASE_DERIVED_TYPES[c] if c in _BASE_DERIVED_TYPES else passthrough[c])
             for c in [*sample.BASE_COLUMNS, "n_skills"]]
     return {
         "base": pa.schema(base),
@@ -87,8 +120,11 @@ def _part_path(path: Path) -> Path:
 def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
     """원자료를 한 번 훑어 중간 자료 여섯 파일을 `out_dir`에 쓰고 {이름: 경로}를 돌려준다.
 
-    각 파일은 먼저 `.part`가 붙은 이름으로 쓰고, 모든 연도를 끝까지 처리한 뒤에 정해진 이름으로 바꾼다.
-    도중에 멈추면 `.part` 파일을 지우므로, 정해진 이름의 파일은 끝까지 처리된 실행의 결과만 남는다.
+    입력을 확인한 뒤 훑기 전에, `out_dir`에 있는 이 함수의 결과 파일 여섯 개와 그 `.part` 파일을 지운다
+    (폴더의 다른 파일은 건드리지 않는다). 각 파일은 먼저 `.part`가 붙은 이름으로 쓰고, 모든 연도를 끝까지
+    처리한 뒤에 정해진 이름으로 바꾼다. 이름 바꾸기까지 어느 단계에서든 멈추면 이번 실행의 결과 파일과
+    `.part` 파일을 모두 지우고 예외를 다시 낸다. 그래서 `out_dir`에 남은 결과 파일은 끝까지 처리된 한 번의
+    실행에서 나온 것뿐이다.
     """
     root, out_dir = Path(root), Path(out_dir)
     years = [int(y) for y in cfg["data"]["years"]]
@@ -100,7 +136,7 @@ def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
 
     # 오래 훑기 전에 모든 연도 파일과 필요한 열이 있는지 확인한다.
     files = {y: rawio.open_postings(postings_dir, y, read_cols + text_cols) for y in years}
-    schemas = _schemas(files[years[0]].schema_arrow)
+    schemas = _schemas(_passthrough_types(files))
 
     ked_firm = ked.extract_ked_firm(root / cfg["data"]["ked_firm"])
     ksic_valid = classif.load_ksic_sub(root / cfg["data"]["ksic"])
@@ -112,6 +148,12 @@ def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
 
     out = {name: out_dir / f"{name}.parquet" for name in OUTPUT_NAMES}
     parts = {name: _part_path(p) for name, p in out.items()}
+
+    def remove_outputs():
+        for p in [*out.values(), *parts.values()]:
+            p.unlink(missing_ok=True)
+
+    remove_outputs()  # 이전 실행의 결과 파일이 이번 실행의 결과로 보이지 않게 한다
     writers = {}
     try:
         for name in ("base", "treat", "skills_long"):
@@ -210,15 +252,14 @@ def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
                                  ("kw_pattern_hits", kw_hits, KW_SCHEMA)):
             with rawio.parquet_writer(parts[name], schema) as w:
                 w.write_table(_to_table(df, schema))
+
+        for name in OUTPUT_NAMES:
+            parts[name].replace(out[name])
     except BaseException:
         for w in writers.values():
             w.close()
-        for p in parts.values():
-            p.unlink(missing_ok=True)
+        remove_outputs()
         raise
-
-    for name in OUTPUT_NAMES:
-        parts[name].replace(out[name])
     return out
 
 
