@@ -14,6 +14,10 @@ p17은 자료 점검 1단계가 날짜로 쓰지 못하는 마감일을 세는�
 없고 마감일이 `9999-12-31`(날짜로 쓸 수 있는 범위 밖)이어서 게시일을 정할 수 없다. 분석 대상 세분류이고
 사업자번호와 AI 에이전트 숙련이 아닌 숙련이 있다.
 
+과제 5에서 인접 숙련 후보 표와 placebo 숙련 후보 표를 시험하려고 숙련 설명 파일에 숙련 세 개(`ADJ_PRESENT`,
+`ADJ_ABSENT`, `PLACEBO_CANDIDATE`)를 더하고, p03에 `ADJ_PRESENT`를, p02에 `PLACEBO_CANDIDATE`를 더했다.
+AI 에이전트 숙련코드 `IT-05-0398`의 세부 분류도 인접 숙련 후보의 이름으로 바꿨다(후보 표에서 빠지는지 보기 위해서다).
+
 여기서 나온 수치는 연구 결과가 아니다.
 """
 import datetime as dt
@@ -28,14 +32,23 @@ import paths
 
 SKILL_KINDS = ["occupation", "transversal", "qualification", "competency", "soft", "physical"]
 
+# 인접 숙련 후보의 세부 분류 이름과 placebo 숙련 후보의 대분류 이름. write_all이 설정에 넣는다.
+ADJ_DETAILS = ["MLOps및AI인프라", "로봇및자율시스템"]
+PLACEBO_DOMAIN = "생산·제조·정비"
+# 세부 분류가 인접 숙련 후보 이름인 숙련. 앞의 것만 가상 공고(p03)에 나온다.
+ADJ_PRESENT = "IT-05-0201"
+ADJ_ABSENT = "IT-05-0301"
+# 대분류가 placebo 숙련 후보 이름이고, 처치 공고 p02에 나와 가상 자료의 희소 필터를 통과하는 숙련
+PLACEBO_CANDIDATE = "PM-01-0001"
+
 # (posting_id, keco_2025, bzno, post_start, detail, {열: [(코드, 숙련명), ...]})
 _POSTINGS = [
     ("p01", "1332", "1000000001", dt.date(2025, 1, 10), "AI 에이전트 개발",
      {"occupation": [("IT-05-0398", "RAG 파이프라인 구축하기"), ("IT-01-0001", "숙련A")]}),
     ("p02", "0262", "1000000001", dt.date(2025, 2, 10), "마케팅 담당",
-     {"occupation": [("IT-05-0410", "ChatGPT 활용하기"), ("SM-01-0001", "숙련B")]}),
+     {"occupation": [("IT-05-0410", "ChatGPT 활용하기"), ("SM-01-0001", "숙련B"), (PLACEBO_CANDIDATE, "용접하기")]}),
     ("p03", "0262", "1000000002", dt.date(2025, 4, 10), "보험 에이전트 모집",
-     {"occupation": [("SM-01-0001", "숙련B")]}),
+     {"occupation": [("SM-01-0001", "숙련B"), (ADJ_PRESENT, "모델 서빙 구축하기")]}),
     ("p04", "0262", None, dt.date(2025, 4, 11), "사무 보조",
      {"occupation": [("IT-05-0396", "프롬프트 엔지니어링하기")]}),
     ("p05", "1332", "1000000003", dt.date(2025, 7, 1), "LangChain 경험자",
@@ -162,27 +175,35 @@ def _postings_table() -> pa.Table:
     return pa.table({k: pa.array(v, type=types[k]) for k, v in cols.items()})
 
 
+# (skill_code_v4, skill_code_v31, 숙련명, 대분류, 중분류[, 세부 분류]). 세부 분류가 없으면 "{숙련명} 세부"이다.
 _CODEBOOK = [
     ("IT-01-0001", "IT-01-001-0001", "숙련A", "IT·디지털·컴퓨팅", "소프트웨어 개발"),
     ("SM-01-0001", "SM-01-001-0001", "숙련B", "영업·마케팅·대외관계", "영업"),
     ("IT-05-0396", "IT-06-012-0028", "프롬프트 엔지니어링하기", "IT·디지털·컴퓨팅", "AI·머신러닝 시스템"),
-    ("IT-05-0398", "IT-06-012-0030", "RAG 파이프라인 구축하기", "IT·디지털·컴퓨팅", "AI·머신러닝 시스템"),
+    ("IT-05-0398", "IT-06-012-0030", "RAG 파이프라인 구축하기", "IT·디지털·컴퓨팅", "AI·머신러닝 시스템",
+     ADJ_DETAILS[0]),
     ("IT-05-0410", "IT-06-012-0044", "ChatGPT 활용하기", "IT·디지털·컴퓨팅", "AI·머신러닝 시스템"),
     ("IT-05-0413", "IT-06-012-0047", "LangChain 프레임워크 활용하기", "IT·디지털·컴퓨팅", "AI·머신러닝 시스템"),
     ("IT-05-0200", "IT-06-011-0001", "MLOps 구축하기", "IT·디지털·컴퓨팅", "AI·머신러닝 시스템"),
     ("SS-02-0009", "SS-01-02-0009", "러시아어 구사하기", "의사소통", "외국어"),
     ("XT-01-0001", "XT-02-009-0000", "학사 학위", "자격·인증", "학위"),
+    (ADJ_PRESENT, "IT-06-011-0002", "모델 서빙 구축하기", "IT·디지털·컴퓨팅", "AI·머신러닝 시스템", ADJ_DETAILS[0]),
+    (ADJ_ABSENT, "IT-06-013-0001", "로봇 제어하기", "IT·디지털·컴퓨팅", "AI·머신러닝 시스템", ADJ_DETAILS[1]),
+    (PLACEBO_CANDIDATE, "PM-01-001-0001", "용접하기", PLACEBO_DOMAIN, "금속 가공"),
 ]
+# 가상 숙련 설명 파일의 AI 에이전트 숙련코드(설정의 v31_prefix `IT-06-012-`로 시작하는 숙련)
+AGENT_CODES = {row[0] for row in _CODEBOOK if row[1].startswith("IT-06-012-")}
 
 
 def _write_codebook(path: Path) -> None:
     rows = []
-    for i, (v4, v31, name, dom, sub) in enumerate(_CODEBOOK, start=1):
+    for i, (v4, v31, name, dom, sub, *rest) in enumerate(_CODEBOOK, start=1):
+        detail = rest[0] if rest else f"{name} 세부"
         rows.append({
             "skill_id": f"S{i:04d}", "skill_code_v4": v4, "skill_code_v31": v31,
             "skill_name": name, "domain_v4": dom, "sub_v4": sub,
-            "detail_v4": f"{name} 세부", "domain_v31": dom, "sub_v31": sub,
-            "detail_v31": f"{name} 세부", "description": f"{name}에 대한 설명",
+            "detail_v4": detail, "domain_v31": dom, "sub_v31": sub,
+            "detail_v31": detail, "description": f"{name}에 대한 설명",
         })
     pd.DataFrame(rows, dtype=str).to_csv(path, index=False, encoding="utf-8-sig")
 
@@ -299,6 +320,10 @@ def write_all(root: Path) -> dict:
     cfg["period"]["start"], cfg["period"]["end"] = "2025-01-01", "2025-12-31"
     cfg["period"]["groups"] = [{"name": PERIOD_NAME, "years": [2025]}]
     cfg["treatment"]["agent_skills"]["move_to_dev"] = ["IT-05-0413"]
+    cfg["skills"]["adjacent_candidate_details"] = list(ADJ_DETAILS)
+    cfg["skills"]["placebo_candidate_domains"] = [PLACEBO_DOMAIN]
+    # 처치 공고가 2건뿐인 가상 자료에서 PLACEBO_CANDIDATE(처치 공고 p02에 1건)가 희소 필터를 통과하게 한다
+    cfg["skills"]["sparse_filter"]["min_treated"] = 1
     return {
         "root": root,
         "postings_dir": postings_dir,
