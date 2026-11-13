@@ -1,4 +1,4 @@
-"""시험용 가상 자료. 뒤 과제의 시험이 아래 공고 16건의 내용에 기대므로 값을 바꾸지 않는다.
+"""시험용 가상 자료. 뒤 과제의 시험이 아래 공고 17건의 내용에 기대므로 값을 바꾸지 않는다.
 
 p13, p14는 게시일 규칙(설계 문서 결정 25)을 시험하려고 나중에 더한 공고이다. p13은 게시일이 없고
 마감일만 있으며, p14는 둘 다 없다. 둘 다 분석 대상 세분류이고 사업자번호와 숙련이 있다.
@@ -9,6 +9,10 @@ p15, p16은 생성형 AI 활용 키워드 사전(설계 문서 결정 36)을 시
 `ChatGPT 활용`이 있고 AI 에이전트 숙련코드는 없다. p16은 본문의 `Fulfillment`에 `llm`이라는 글자가
 들어 있지만 낱말의 일부이므로 사전에 걸리지 않아야 한다. 둘 다 분석 대상 세분류이고 사업자번호,
 게시일, AI 에이전트 숙련이 아닌 숙련이 있다.
+
+p17은 자료 점검 1단계가 날짜로 쓰지 못하는 마감일을 세는지 시험하려고 과제 4에서 더한 공고이다. 게시일이
+없고 마감일이 `9999-12-31`(날짜로 쓸 수 있는 범위 밖)이어서 게시일을 정할 수 없다. 분석 대상 세분류이고
+사업자번호와 AI 에이전트 숙련이 아닌 숙련이 있다.
 
 여기서 나온 수치는 연구 결과가 아니다.
 """
@@ -62,17 +66,23 @@ _POSTINGS = [
     # 낱말 안에 `llm`이 들어 있지만 어느 사전에도 걸리지 않는 공고
     ("p16", "1332", "1000000005", dt.date(2025, 9, 1), "Fulfillment 센터 물류 관리",
      {"occupation": [("IT-01-0001", "숙련A")]}),
+    # 게시일이 없고 마감일이 날짜로 쓸 수 없는 값(9999-12-31)인 공고
+    ("p17", "1332", "1000000006", None, "일반",
+     {"occupation": [("IT-01-0001", "숙련A")]}),
 ]
 
 ID_END_ONLY = "p13"
 ID_NO_DATE = "p14"
 ID_USE_KEYWORD_ONLY = "p15"
 ID_FULFILLMENT = "p16"
+ID_END_UNUSABLE = "p17"
 # 마감일은 게시일 30일 뒤로 준다. 게시일이 없는 공고의 마감일은 아래 표에서 정한다(없으면 결측).
 _POST_END_DAYS = 30
-_POST_END_WITHOUT_START = {ID_END_ONLY: dt.date(2025, 12, 20)}
+_POST_END_WITHOUT_START = {ID_END_ONLY: dt.date(2025, 12, 20), ID_END_UNUSABLE: dt.date(9999, 12, 31)}
 # 가상 공고의 연도(2025)가 드는 기간의 이름. write_all이 설정의 period.groups에 넣는다.
 PERIOD_NAME = "가상 기간"
+# write_all이 설정의 occupations.keco4에 넣는 분석 대상 세분류
+OCCUPATIONS = ["1332", "0262"]
 
 _KSIC_CYCLE = ["62010", "Q86201", "1220", "C30", None, "47121"]   # 47121: 가상 소분류표에 없는 소분류(471)
 _REGIONS = ["서울 마포구", "경기도 성남시", "부산전체", None, "광주 북구", "전남광주통합특별시 광산구"]
@@ -88,6 +98,22 @@ def _post_end(p) -> dt.date | None:
     if p[3] is None:
         return _POST_END_WITHOUT_START.get(p[0])
     return p[3] + dt.timedelta(days=_POST_END_DAYS)
+
+
+def _usable(d: dt.date | None) -> bool:
+    """날짜가 있고 게시일로 쓸 수 있는 범위(`datetime64[ns]`, 1677~2262년) 안인지."""
+    return d is not None and pd.Timestamp.min.date() <= d <= pd.Timestamp.max.date()
+
+
+# 가상 공고 목록에서 센 공고 수. 시험이 숫자를 직접 적지 않고 이 값과 비교한다.
+# 게시일로 쓸 날짜가 첫 날짜 열(post_start)에 없는 공고
+N_NO_POST_START = sum(not _usable(p[3]) for p in _POSTINGS)
+# 두 날짜 열 어디에도 게시일로 쓸 날짜가 없는 공고
+N_NO_DATE = sum(not _usable(p[3]) and not _usable(_post_end(p)) for p in _POSTINGS)
+# 첫 날짜 열에 날짜가 없고 마감일에 값이 있지만 날짜로 쓸 수 없는 공고
+N_END_UNUSABLE = sum(not _usable(p[3]) and _post_end(p) is not None and not _usable(_post_end(p)) for p in _POSTINGS)
+# 분석 대상 세분류이고 게시일과 마감일이 모두 날짜로 읽히는 공고
+N_IN_OCC_BOTH_DATES = sum(p[1] in OCCUPATIONS and _usable(p[3]) and _usable(_post_end(p)) for p in _POSTINGS)
 
 
 def _postings_table() -> pa.Table:
@@ -267,7 +293,7 @@ def write_all(root: Path) -> dict:
     cfg["data"]["ksic"] = "data/postings/KSIC10.xlsx"
     cfg["data"]["keco"] = "data/postings/KECO2025.xlsx"
     cfg["data"]["ked_firm"] = "data/ked/KED5002.txt"
-    cfg["occupations"]["keco4"] = ["1332", "0262"]
+    cfg["occupations"]["keco4"] = list(OCCUPATIONS)
     cfg["occupations"]["exclude_keco2"] = ["01", "61"]
     # 가상 공고의 게시일(게시일이 없으면 마감일)은 모두 2025년이다
     cfg["period"]["start"], cfg["period"]["end"] = "2025-01-01", "2025-12-31"

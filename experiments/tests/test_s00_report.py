@@ -152,11 +152,14 @@ def test_post_start_missing_and_other_region_words_in_report(synth_data, tmp_pat
     assert len(y) == 1 and pd.isna(y.loc[2025, "source"])
     # 과제 3: 게시일이 없는 가상 공고 p13, p14를 더해 12, 2, 2 / 12에서 바꿨다
     # 과제 3A: 게시일이 있는 공고 p15, p16을 더해 14, 4 / 14에서 16, 4 / 16으로 바꿨다
-    assert y.loc[2025, "n_raw"] == 16 and y.loc[2025, "n_no_post_start"] == 4
-    assert y.loc[2025, "no_post_start_rate"] == pytest.approx(4 / 16)
+    # 과제 4: 게시일이 없고 마감일을 날짜로 쓸 수 없는 p17(잡사이트B)을 더해 17, 5 / 17로 바꿨다
+    assert y.loc[2025, "n_raw"] == 17 and y.loc[2025, "n_no_post_start"] == 5
+    assert y.loc[2025, "no_post_start_rate"] == pytest.approx(5 / 17)
     assert y.loc[2025, "in_occ_use_no_post_start_rate"] == pytest.approx(1 / 3)
     s = m[m["level"] == "연도·수집 사이트"]
-    assert s["source"].tolist() == ["잡사이트A", "잡사이트B"]   # 게시일 없는 공고가 있는 사이트만, 건수가 같으면 이름 순
+    # 게시일 없는 공고가 있는 사이트만, 건수가 많은 사이트부터. 과제 4에서 p17이 더해져 잡사이트B가 3건,
+    # 잡사이트A가 2건이 되어 순서를 바꿨다(이름 순이었다면 A가 앞에 온다)
+    assert s["source"].tolist() == ["잡사이트B", "잡사이트A"]
     w = t["t12b_sido_other_words"]
     assert list(w.columns) == ["word", "n"] and w.iloc[0].tolist() == ["광산구", 2]
 

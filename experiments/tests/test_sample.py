@@ -133,10 +133,11 @@ def test_base_merges_sido_and_blanks_ksic_not_in_table(base):
     assert (base["ksic5"].notna() & base["ksic_sub"].isna()).any()
 
 def test_base_keeps_every_row_and_flags(base):
-    assert len(base) == 16                               # 과제 3에서 p13, p14를 더해 12에서 14로, 과제 3A에서 p15, p16을 더해 16으로 바꿨다
+    assert len(base) == 17                               # 과제 3에서 p13, p14를 더해 12에서 14로, 과제 3A에서 p15, p16을 더해 16으로 바꿨다(과제 4: p17을 더해 17)
     assert sorted(base.index[~base.in_occ]) == ["p07", "p08"]
     assert sorted(base.index[~base.has_bzno]) == ["p04"]
-    assert sorted(base.index[~base.in_period]) == [synth.ID_NO_DATE]   # 과제 3: 게시일과 마감일이 모두 없는 공고
+    # 과제 3: 게시일과 마감일이 모두 없는 공고. 과제 4: 마감일이 날짜로 쓸 수 없는 값인 p17을 더했다
+    assert sorted(base.index[~base.in_period]) == [synth.ID_NO_DATE, synth.ID_END_UNUSABLE]
     assert base.loc["p05", "quarter"] == "2025Q3" and base.loc["p01", "keco2"] == "13"
 
 def test_ked_join(base):
@@ -155,7 +156,7 @@ def test_exclusions_in_order(base, synth_data):
     assert sorted(kept.posting_id) == ["p01", "p02", "p03", "p05", "p09", "p11", "p12", "p13", "p15", "p16"]
     # 과제 3: 연도가 결측인 공고(p14)가 생겨 건수 표에 연도가 결측인 행이 있으므로 단계별로 더해 본다
     c = counts.groupby("step")[["n_dropped", "n_after"]].sum()
-    assert c.loc["in_period", "n_dropped"] == 1
+    assert c.loc["in_period", "n_dropped"] == 2   # p14, p17(과제 4에서 p17을 더해 1에서 바꿨다)
     assert c.loc["in_occ", "n_dropped"] == 2 and c.loc["has_bzno", "n_dropped"] == 1 and c.loc["has_skill", "n_dropped"] == 2
     assert c.loc["has_skill", "n_after"] == 10   # 과제 3A에서 p15, p16을 더해 8에서 바꿨다
 
@@ -164,7 +165,7 @@ def test_period_filter(synth_data):
     cfg["period"].update({"start": "2025-07-01", "end": "2025-12-31"})
     raw = pd.concat(rawio.iter_postings(synth_data["postings_dir"], 2025, sample.RAW_COLUMNS))
     b = sample.build_posting_base(raw, ked.extract_ked_firm(synth_data["ked_firm"]), set(), cfg)
-    assert (~b.in_period).sum() == 5                     # p01~p04와 날짜가 없는 p14(과제 3에서 4에서 바꿨다)
+    assert (~b.in_period).sum() == 6                     # p01~p04와 날짜가 없는 p14(과제 3에서 4에서 바꿨다), p17(과제 4에서 6으로 바꿨다)
 
 def test_period_compares_dates_not_times(synth_data):
     # 전체 검토 수정에서 더한 시험. 게시일에 시각이 있어도 날짜로 분석 기간을 판단한다.
@@ -193,7 +194,7 @@ def test_missing_bzno_never_joins(synth_data):
                         "ked_size": pd.array(["BAD"], dtype="string"), "ked_ipo": pd.array(["Y"], dtype="string"),
                         "ked_venture": pd.array(["Y"], dtype="string")})
     b = sample.build_posting_base(raw, pd.concat([k, bad], ignore_index=True), set(), synth_data["cfg"]).set_index("posting_id")
-    assert len(b) == 16                                  # 과제 3에서 p13, p14를 더해 12에서 14로, 과제 3A에서 p15, p16을 더해 16으로 바꿨다
+    assert len(b) == 17                                  # 과제 3에서 p13, p14를 더해 12에서 14로, 과제 3A에서 p15, p16을 더해 16으로 바꿨다(과제 4: p17을 더해 17)
     assert not b.loc["p04", "ked_matched"]
     assert pd.isna(b.loc["p04", "ked_size"]) and pd.isna(b.loc["p04", "firm_age"])
     assert b.loc["p01", "ked_matched"] and b.loc["p01", "firm_age"] == 15

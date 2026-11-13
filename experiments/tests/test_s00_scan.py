@@ -1,6 +1,9 @@
 import importlib.util, pandas as pd, paths
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
+
+import synth
 from aabundle import rawio
 
 def load_script():
@@ -25,10 +28,11 @@ def test_scan_outputs(synth_data, tmp_path):
     assert o.loc["0262", "n"] == 7 and o.loc["0262", "n_use"] == 2       # p02, p04 (n: 과제 3에서 p14를 더해 5에서 6으로, 과제 3A에서 p15를 더해 7로 바꿨다)
     assert o.loc["1332", "n_use"] == 1 and o.loc["1332", "n_dev"] == 2   # p05 / p01, p05
     assert o.loc["9052", "n"] == 1 and o.loc["NA", "n"] == 1
-    assert stats.loc[2025, "n_raw"] == 16 and stats.loc[2025, "n_in_occ"] == 13   # 과제 3: p13, p14를 더해 12, 10에서 14, 11로, 과제 3A: p15, p16을 더해 16, 13으로 바꿨다
+    assert stats.loc[2025, "n_raw"] == 17 and stats.loc[2025, "n_in_occ"] == 13   # 과제 3: p13, p14를 더해 12, 10에서 14, 11로, 과제 3A: p15, p16을 더해 16, 13으로, 과제 4: p17을 더해 n_raw를 17로 바꿨다
     assert stats.loc[2025, "n_unmatched"] == 1
 
-    kw = pd.read_parquet(out["kw_pattern_hits"]).set_index("pattern")
+    kw = pd.read_parquet(out["kw_pattern_hits"])
+    kw = kw[kw["dictionary"] != "use"].set_index("pattern")   # 과제 4에서 더한 생성형 AI 활용 사전의 행은 따로 시험한다
     assert len(kw) == len(synth_data["cfg"]["treatment"]["keywords"]["strict"]) + \
         len(synth_data["cfg"]["treatment"]["keywords"]["broad_extra"])
     assert kw.loc["Claude", "n"] == 1 and kw.loc["Claude", "dictionary"] == "broad_extra"   # p11
@@ -60,14 +64,27 @@ def test_scan_counts_postings_without_post_start_and_other_region_words(synth_da
     out = load_script().scan(synth_data["cfg"], synth_data["root"], tmp_path / "s0")
     stats = pd.read_parquet(out["scan_stats"]).set_index("year")
     m = pd.read_parquet(out["post_start_missing"])
-    assert list(m.columns) == ["year", "source", "n_raw", "n_no_post_start", "n_in_occ", "n_in_occ_no_post_start",
-                               "n_in_occ_use", "n_in_occ_use_no_post_start"]
+    # 과제 4: 게시일을 정할 수 없는 공고, 날짜로 쓸 수 없는 마감일, 마감일로 게시일을 정한 공고의 건수 열을 더했다
+    assert list(m.columns) == ["year", "source", "n_raw", "n_no_post_start", "n_no_date", "n_end_unusable",
+                               "n_in_occ", "n_in_occ_no_post_start", "n_in_occ_no_date", "n_in_occ_end_unusable",
+                               "n_in_occ_from_end_in_period", "n_in_occ_use", "n_in_occ_use_no_post_start",
+                               "n_in_occ_use_no_date", "n_in_occ_use_from_end_in_period"]
     assert (m.groupby("year")["n_raw"].sum() == stats["n_raw"]).all()
-    assert m["n_no_post_start"].sum() == len(MISSING_POST_START) + 2          # + p13, p14
-    s = m.set_index("source")
-    assert s.loc["잡사이트B"].drop("year").tolist() == [5, 2, 4, 2, 2, 1]   # p02, p05, p08, p11, p14
-    assert s.loc["잡사이트A"].drop("year").tolist() == [6, 2, 5, 1, 1, 0]   # p01, p04, p07, p10, p13, p16(과제 3A)
-    assert m["n_in_occ"].sum() == 14 and m["n_in_occ_use"].sum() == 3       # 게시일과 관계없이 센다(과제 3A: p15, p16을 더해 12에서 바꿨다)
+    assert m["n_no_post_start"].sum() == len(MISSING_POST_START) + synth.N_NO_POST_START   # + p13, p14, p17(과제 4)
+    s = m.set_index("source").drop(columns="year")
+    # 잡사이트B: p02, p05, p08, p11, p14, p17(과제 4). p02는 마감일로 게시일을 정하고, p17은 마감일이 9999-12-31
+    assert s.loc["잡사이트B"].to_dict() == {
+        "n_raw": 6, "n_no_post_start": 3, "n_no_date": 2, "n_end_unusable": 1,
+        "n_in_occ": 5, "n_in_occ_no_post_start": 3, "n_in_occ_no_date": 2, "n_in_occ_end_unusable": 1,
+        "n_in_occ_from_end_in_period": 1, "n_in_occ_use": 2, "n_in_occ_use_no_post_start": 1,
+        "n_in_occ_use_no_date": 0, "n_in_occ_use_from_end_in_period": 1}
+    # 잡사이트A: p01, p04, p07, p10, p13, p16(과제 3A). p13은 마감일로 게시일을 정한다
+    assert s.loc["잡사이트A"].to_dict() == {
+        "n_raw": 6, "n_no_post_start": 2, "n_no_date": 0, "n_end_unusable": 0,
+        "n_in_occ": 5, "n_in_occ_no_post_start": 1, "n_in_occ_no_date": 0, "n_in_occ_end_unusable": 0,
+        "n_in_occ_from_end_in_period": 1, "n_in_occ_use": 1, "n_in_occ_use_no_post_start": 0,
+        "n_in_occ_use_no_date": 0, "n_in_occ_use_from_end_in_period": 0}
+    assert m["n_in_occ"].sum() == 15 and m["n_in_occ_use"].sum() == 3       # 게시일과 관계없이 센다(과제 3A: p15, p16을 더해 12에서 14로, 과제 4: p17을 더해 15로 바꿨다)
     assert "p02" in set(pd.read_parquet(out["base"])["posting_id"])          # 마감일이 있어 남는다(과제 3)
 
     w = pd.read_parquet(out["sido_other_words"])
@@ -84,3 +101,73 @@ def test_scan_never_stores_posting_text(synth_data, tmp_path):
         df = pd.read_parquet(p)
         assert "detail" not in df.columns and "title" not in df.columns
         assert not df.astype(str).apply(lambda c: c.str.contains("에이전트 개발")).any().any()
+
+
+# 과제 4에서 더한 시험. 가상 자료를 바꾸지 않고 1단계를 한 번 실행한 결과를 본다.
+@pytest.fixture
+def s00():
+    return load_script()
+
+
+@pytest.fixture
+def scan_out(s00, synth_data, tmp_path):
+    return s00.scan(synth_data["cfg"], synth_data["root"], tmp_path / "s0")
+
+
+def test_scan_counts_dates_taken_from_post_end(scan_out):
+    psm = pd.read_parquet(scan_out["post_start_missing"])
+    total = psm.drop(columns=["year", "source"]).sum()
+    # 가상 공고 ID_END_ONLY, ID_NO_DATE, ID_END_UNUSABLE(과제 4) / ID_NO_DATE, ID_END_UNUSABLE
+    assert total["n_no_post_start"] == synth.N_NO_POST_START and total["n_no_date"] == synth.N_NO_DATE
+    assert total["n_end_unusable"] == synth.N_END_UNUSABLE == 1 and total["n_in_occ_end_unusable"] == 1   # ID_END_UNUSABLE
+    assert total["n_in_occ_from_end_in_period"] == 1
+    assert total["n_in_occ_no_post_start"] - total["n_in_occ_no_date"] >= total["n_in_occ_from_end_in_period"]
+    base = pd.read_parquet(scan_out["base"])
+    assert synth.ID_END_ONLY in set(base["posting_id"]) and synth.ID_NO_DATE not in set(base["posting_id"])
+    assert synth.ID_END_UNUSABLE not in set(base["posting_id"])
+    assert set(base["date_source"]) == {"post_start", "post_end"} and base["period"].notna().all()
+
+
+def test_scan_writes_post_end_gap(scan_out, s00):
+    gap = pd.read_parquet(scan_out["post_end_gap"])
+    assert list(gap.columns) == ["year", "bin", "n"]
+    assert gap["bin"].nunique() == len(s00.POST_END_GAP_BINS)                 # 공고가 없는 구간도 0으로 있다
+    assert gap.loc[gap["bin"] == "8~30일", "n"].sum() >= 1                      # 가상 공고의 마감일은 게시일 30일 뒤
+    assert gap["n"].sum() == synth.N_IN_OCC_BOTH_DATES      # 분석 대상 세분류이고 두 날짜가 모두 있는 가상 공고 수
+
+
+def test_post_end_gap_is_empty_with_one_date_column(synth_data, tmp_path, s00):
+    synth_data["cfg"]["period"]["date_columns"] = ["post_start"]
+    out = s00.scan(synth_data["cfg"], synth_data["root"], tmp_path / "s0")
+    gap = pd.read_parquet(out["post_end_gap"])
+    assert list(gap.columns) == ["year", "bin", "n"] and gap.empty
+    psm = pd.read_parquet(out["post_start_missing"])
+    assert psm["n_end_unusable"].sum() == 0 and psm["n_in_occ_from_end_in_period"].sum() == 0
+
+
+def test_scan_stores_text_length(scan_out):
+    base = pd.read_parquet(scan_out["base"]).set_index("posting_id")
+    assert base["text_len"].dtype == "int64" and (base["text_len"] >= 0).all()
+    detail = {p[0]: p[4] for p in synth._POSTINGS}       # 설정의 본문 열은 detail 하나이다
+    assert base["text_len"].to_dict() == {i: len(detail[i] or "") for i in base.index}
+    assert base.loc["p06", "text_len"] == 0               # 본문이 없는 공고
+    # 본문 자체는 어느 결과에도 없다(test_scan_never_stores_posting_text는 새 열과 새 파일까지 모두 본다)
+    texts = [p[4] for p in synth._POSTINGS if p[4]]
+    for name in ("base", "treat", "skills_long"):
+        df = pd.read_parquet(scan_out[name]).astype(str)
+        for t in texts:
+            assert not df.apply(lambda c: c.str.contains(t, regex=False)).any().any()
+
+
+def test_scan_counts_use_dictionary_patterns(scan_out, synth_data):
+    kw = pd.read_parquet(scan_out["kw_pattern_hits"])
+    use = kw[kw["dictionary"] == "use"]
+    patterns = synth_data["cfg"]["treatment"]["keywords"]["use"]
+    assert use.groupby("year")["pattern"].apply(list).to_dict() == {y: patterns for y in synth_data["cfg"]["data"]["years"]}
+    by_pattern = use.groupby("pattern")["n"].sum()
+    assert by_pattern[r"Chat\s*GPT"] >= 1                                  # ID_USE_KEYWORD_ONLY
+    # `Claude`는 넓은 사전과 생성형 AI 활용 사전에 모두 있다. 사전마다 따로 센다(p11)
+    assert by_pattern["Claude"] == 1
+    assert kw.loc[(kw["dictionary"] == "broad_extra") & (kw["pattern"] == "Claude"), "n"].sum() == 1
+    treat = pd.read_parquet(scan_out["treat"])
+    assert by_pattern.max() <= treat["kw_use"].sum()                         # kw_use가 참인 공고 안에서만 센다

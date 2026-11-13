@@ -13,8 +13,10 @@ import pytest
 import synth
 from test_s00_scan import load_script
 
+# 과제 4에서 period.date_columns, period.groups, industry.not_in_table, region.merge_sido를 더했다
 SCAN_KEYS = ["data.years", "data.codebook", "data.ksic", "data.ked_firm", "period.start", "period.end",
-             "occupations.keco4", "treatment.text_columns", "treatment.keywords", "treatment.agent_skills",
+             "period.date_columns", "period.groups", "occupations.keco4", "industry.not_in_table",
+             "region.merge_sido", "treatment.text_columns", "treatment.keywords", "treatment.agent_skills",
              "salary_band_edges"]
 
 
@@ -71,6 +73,17 @@ def test_build_tables_refuses_interim_files_from_another_config(synth_data, tmp_
     for key in ("period.start", "treatment.keywords.strict", "data.years"):
         assert key in str(e.value)
     assert "treatment.keywords.exclude" not in str(e.value)
+
+
+def test_build_tables_refuses_when_merge_sido_changed(synth_data, tmp_path):
+    # 과제 4에서 더한 시험. 시도 묶음은 1단계가 base에 쓰는 sido를 바꾸므로 scan을 다시 해야 한다.
+    s00, _ = _scan(synth_data, tmp_path)
+    with pytest.raises(RuntimeError, match=r"region\.merge_sido"):
+        s00.build_tables(_set(synth_data["cfg"], "region.merge_sido", {}), synth_data["root"], tmp_path / "s0")
+    # 직종군별 추정의 처치 공고 수 기준은 1단계에서 쓰지 않는다
+    tables = s00.build_tables(_set(synth_data["cfg"], "occupations.group_min_treated", 50),
+                              synth_data["root"], tmp_path / "s0")
+    assert "t01_exclusions" in tables
 
 
 @pytest.mark.parametrize("key, value", [
@@ -149,7 +162,7 @@ def test_rename_is_retried_on_permission_error(synth_data, tmp_path, monkeypatch
     s00 = load_script()
     tries = _replace_failing(monkeypatch, s00, 2)
     out = s00.scan(synth_data["cfg"], synth_data["root"], tmp_path / "s0")
-    assert len(tries) == 9 and set(tries.values()) == {3}
+    assert len(tries) == 10 and set(tries.values()) == {3}   # 과제 4에서 post_end_gap을 더해 9에서 바꿨다
     assert all(p.exists() for p in out.values())
     assert len(pd.read_parquet(out["base"])) == 13   # 과제 3: p13이 더해져 10에서 11로, 과제 3A: p15, p16이 더해져 13으로 바꿨다
 

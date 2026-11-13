@@ -41,22 +41,22 @@ def test_skill_code_flags(treat):
     assert ids(treat.has_dev) == ["p01", "p05"]
     assert ids(treat.treat_code) == ["p01", "p02", "p04", "p05"]
     assert ids(treat.treat_all) == ["p01", "p02", "p04", "p05", "p07", "p09"]
-    assert len(treat) == 16   # 과제 3에서 p13, p14를 더해 12에서 14로, 과제 3A에서 p15, p16을 더해 16으로 바꿨다
+    assert len(treat) == 17   # 과제 3에서 p13, p14를 더해 12에서 14로, 과제 3A에서 p15, p16을 더해 16으로 바꿨다(과제 4: p17을 더해 17)
 
 def test_select_arms_use_definition(treat):
     arm = treatment.select_arms(treat.reset_index(), "use")
     arm.index = treat.index
     assert ids(arm == 1) == ["p02", "p04", "p05"]
-    # p13, p14: 과제 3. 과제 3A에서 생성형 AI 활용 키워드에 걸린 p11을 빼고 p16을 더했다
-    assert ids(arm == 0) == ["p03", "p06", "p08", "p10", "p12", "p13", "p14", "p16"]
+    # p13, p14: 과제 3. 과제 3A에서 생성형 AI 활용 키워드에 걸린 p11을 빼고 p16을 더했다. p17: 과제 4
+    assert ids(arm == 0) == ["p03", "p06", "p08", "p10", "p12", "p13", "p14", "p16", "p17"]
     # 개발 숙련만 있거나 키워드에만 걸린 공고(p11, p15는 생성형 AI 활용 키워드에 걸린 공고, 과제 3A)
     assert ids(arm.isna()) == ["p01", "p07", "p09", "p11", "p15"]
 
 # 전체 검토 수정에서 더한 시험: 처치 정의 각각의 처치 공고와 비교 공고(가상 자료 공고 16건,
 # 과제 3에서 비교 공고 p13, p14를 더했다). 과제 3A에서 생성형 AI 활용 키워드에 걸린 공고(p11, p15)를
 # 비교 공고에서 빼고 비교 공고 p16을 더했다. 그래서 엄격한 사전과 넓은 사전의 비교 공고가 같아졌다
-# (p11은 넓은 사전에도 걸린다).
-_COMPARISON = ["p03", "p06", "p08", "p10", "p12", "p13", "p14", "p16"]
+# (p11은 넓은 사전에도 걸린다). 과제 4에서 비교 공고 p17을 더했다.
+_COMPARISON = ["p03", "p06", "p08", "p10", "p12", "p13", "p14", "p16", "p17"]
 _ARMS = [
     ("kw_strict", "all", ["p01", "p02", "p04", "p05", "p07", "p09"], _COMPARISON),
     ("kw_strict", "dev", ["p01", "p05"], _COMPARISON),

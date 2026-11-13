@@ -3,7 +3,7 @@ from aabundle import rawio
 
 def test_iter_postings_yields_row_groups(synth_data):
     chunks = list(rawio.iter_postings(synth_data["postings_dir"], 2025, ["posting_id", "bzno"]))
-    assert [len(c) for c in chunks] == [5, 5, 5, 1]   # 과제 3에서 [5, 5, 2]에서 [5, 5, 4]로, 과제 3A에서 공고 두 건을 더해 바꿨다
+    assert [len(c) for c in chunks] == [5, 5, 5, 2]   # 과제 3에서 [5, 5, 2]에서 [5, 5, 4]로, 과제 3A에서 공고 두 건을 더해, 과제 4에서 p17을 더해 바꿨다
     assert list(chunks[0].columns) == ["posting_id", "bzno"]
 
 def test_missing_file_names_the_file(tmp_path):

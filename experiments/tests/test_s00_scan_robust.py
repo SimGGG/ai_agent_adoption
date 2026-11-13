@@ -10,8 +10,9 @@ import pytest
 from aabundle import rawio
 from test_s00_scan import load_script
 
+# post_start_missing, sido_other_words는 과제 10 수정에서, post_end_gap은 과제 4에서 더했다
 OUT_NAMES = ["occ_year_all", "base", "treat", "skills_long", "scan_stats", "kw_pattern_hits",
-             "post_start_missing", "sido_other_words"]   # 뒤의 두 파일은 과제 10 수정에서 더했다
+             "post_start_missing", "sido_other_words", "post_end_gap"]
 
 
 def _year_file(synth_data, year, prefix, changes):
@@ -20,8 +21,9 @@ def _year_file(synth_data, year, prefix, changes):
     ids = [prefix + p[1:] for p in t.column("posting_id").to_pylist()]
     t = t.set_column(t.schema.get_field_index("posting_id"), "posting_id", pa.array(ids, pa.string()))
     # 과제 3: 마감일 열이 생기고 게시일이 없는 공고가 더해져, 두 날짜 열을 모두 옮기고 결측은 그대로 둔다
+    # 과제 4: 날짜로 쓸 수 없는 마감일(p17의 9999-12-31)은 연도를 바꾸지 않고 그대로 둔다
     for col in ("post_start", "post_end"):
-        dates = [d if d is None else d.replace(year=year) for d in t.column(col).to_pylist()]
+        dates = [d if d is None or d.year != 2025 else d.replace(year=year) for d in t.column(col).to_pylist()]
         t = t.set_column(t.schema.get_field_index(col), col, pa.array(dates, pa.date32()))
     for name, arr in changes.items():
         t = t.set_column(t.schema.get_field_index(name), name, arr)
@@ -37,7 +39,7 @@ def _two_year_cfg(synth_data):
 
 
 def test_scan_promotes_column_types_across_years(synth_data, tmp_path):
-    n = 16   # 가상 공고 수(과제 3에서 12에서 14로, 과제 3A에서 16으로 바꿨다)
+    n = 17   # 가상 공고 수(과제 3에서 12에서 14로, 과제 3A에서 16으로, 과제 4에서 17로 바꿨다)
     # 2023년: career_type은 값이 하나도 없어 null 형식, dup_count는 정수
     _year_file(synth_data, 2023, "a", {"career_type": pa.nulls(n)})
     # 2024년: career_type은 문자열, dup_count는 결측과 소수가 있는 실수
@@ -61,7 +63,7 @@ def test_scan_promotes_column_types_across_years(synth_data, tmp_path):
 
 
 def test_scan_stops_before_writing_when_types_cannot_be_matched(synth_data, tmp_path):
-    n = 16   # 가상 공고 수(과제 3에서 12에서 14로, 과제 3A에서 16으로 바꿨다)
+    n = 17   # 가상 공고 수(과제 3에서 12에서 14로, 과제 3A에서 16으로, 과제 4에서 17로 바꿨다)
     _year_file(synth_data, 2023, "a", {})
     _year_file(synth_data, 2024, "b", {"ai_peripheral": pa.array(["예"] * n, pa.string())})
     out_dir = tmp_path / "s0"

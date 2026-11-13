@@ -2,8 +2,8 @@
 
 1단계 `scan`: 연도별 공고 파일을 행 묶음(row group) 단위로 한 번 훑어, 공고 단위 중간 자료와
 작은 집계 자료, 1단계 기록(`scan_meta.json`: 실행 시각, 코드 시점, 1단계의 결과를 바꾸는 설정 값)을
-`out_dir`에 쓴다. 공고 원문 열은 처치 판별과 키워드 표현별 공고 수를 세는 데에만 메모리에서 쓰고,
-어떤 파일과 화면 출력에도 남기지 않는다.
+`out_dir`에 쓴다. 공고 원문 열은 처치 판별, 키워드 표현별 공고 수, 본문 글자 수를 세는 데에만 메모리에서 쓰고,
+어떤 파일과 화면 출력에도 남기지 않는다(글자 수만 `base`에 쓴다).
 
 2단계 `report`: 1단계 기록의 설정 값이 지금 설정과 같은지 확인한 뒤, 1단계의 중간 자료로 집계표
 (`build_tables`), 결과모형 한 번의 학습 시간(`time_outcome_model`), 자료 점검 보고서(`write_report`)를
@@ -35,15 +35,19 @@ import paths
 from aabundle import classif, ked, rawio, sample, skills, treatment, validate
 
 OUTPUT_NAMES = ("occ_year_all", "base", "treat", "skills_long", "scan_stats", "kw_pattern_hits",
-                "post_start_missing", "sido_other_words")
-# 1단계를 실행한 때, 코드 시점, 1단계의 결과를 바꾸는 설정 항목을 적은 기록(JSON). 위 여덟 파일과 함께 쓰고 지운다.
+                "post_start_missing", "sido_other_words", "post_end_gap")
+# 1단계를 실행한 때, 코드 시점, 1단계의 결과를 바꾸는 설정 항목을 적은 기록(JSON). 위 아홉 파일과 함께 쓰고 지운다.
 META_NAME = "scan_meta"
 # 1단계 기록에 남기는 설정 항목. `scan`이 읽어 결과가 달라지는 항목만이다. 나머지 항목(`data.keco`, `period.unit`,
 # `occupations.min_use_postings`, `sample`, `treatment.definition`, `treatment.keyword_dictionary`, `skills`,
 # `estimation` 등)은 2단계(`report`)에서만 쓰므로, 바꾼 뒤 `report`만 다시 실행하면 된다.
 SCAN_CONFIG_KEYS = ("data.years", "data.codebook", "data.ksic", "data.ked_firm", "period.start", "period.end",
-                    "occupations.keco4", "treatment.text_columns", "treatment.keywords", "treatment.agent_skills",
+                    "period.date_columns", "period.groups", "occupations.keco4", "industry.not_in_table",
+                    "region.merge_sido", "treatment.text_columns", "treatment.keywords", "treatment.agent_skills",
                     "salary_band_edges")
+# 마감일에서 게시일을 뺀 일수의 구간(`post_end_gap`): (구간 이름, 아래 끝, 위 끝). 두 끝을 포함하고, None은 끝이 없다는 뜻이다.
+POST_END_GAP_BINS = (("음수", None, -1), ("0~7일", 0, 7), ("8~30일", 8, 30), ("31~60일", 31, 60),
+                     ("61~90일", 61, 90), ("91~180일", 91, 180), ("181일 이상", 181, None))
 # 결과 파일의 이름을 바꿀 때 PermissionError가 나면 기다렸다가 다시 해 보는 횟수(첫 시도 포함)와 기다리는 시간(초).
 # 구글 드라이브 동기화 프로그램이 파일을 잠깐 잡고 있으면 이름 바꾸기가 실패하기 때문이다.
 RENAME_ATTEMPTS = 5
@@ -61,19 +65,28 @@ _BASE_DERIVED_TYPES = {
     "year": _INT, "month": _INT, "quarter": _STR, "period": _STR, "date_source": _STR, "bzno": _STR,
     "ksic5": _STR, "ksic_sub": _STR, "firm_emp_log": pa.float64(), "keco4": _STR, "keco2": _STR, "salary_band": _STR, "sido": _STR,
     "ked_matched": _BOOL, "firm_age": _INT, "ked_size": _STR, "ked_ipo": _STR, "ked_venture": _STR,
-    "in_period": _BOOL, "in_occ": _BOOL, "has_bzno": _BOOL, "n_skills": _INT,
+    "in_period": _BOOL, "in_occ": _BOOL, "has_bzno": _BOOL, "n_skills": _INT, "text_len": _INT,
 }
+# `sample.BASE_COLUMNS` 뒤에 붙이는 열: 숙련 수, 본문(`treatment.text_columns`의 열을 이은 글자열)의 글자 수
+_BASE_EXTRA_COLUMNS = ["n_skills", "text_len"]
 _TREAT_FLAGS = ["kw_strict", "kw_broad", "kw_use", "has_dev", "has_use", "treat_code", "treat_all"]
+# 키워드 사전마다, 표현별 공고 수를 셀 공고를 정하는 처치 표시 열. 표현별 공고 수는 그 표시가 참인 공고 안에서 센다.
+_KW_COUNT_FLAG = {"strict": "kw_broad", "broad_extra": "kw_broad", "use": "kw_use"}
+# 처치 표시 열마다, 표현별 공고 수를 셀 표현 목록(`treatment.keyword_lists`의 이름)
+_KW_FLAG_PATTERNS = {"kw_broad": "broad", "kw_use": "use"}
 
 OCC_SCHEMA = pa.schema([("year", _INT), ("keco4", _STR), ("n", _INT), ("n_skill", _INT),
                         ("n_use", _INT), ("n_dev", _INT)])
 STATS_SCHEMA = pa.schema([("year", _INT), ("n_raw", _INT), ("n_in_period", _INT), ("n_in_occ", _INT),
                           ("n_tokens", _INT), ("n_unmatched", _INT), ("n_length_mismatch_rows", _INT)])
 KW_SCHEMA = pa.schema([("year", _INT), ("dictionary", _STR), ("pattern", _STR), ("n", _INT)])
-_PSM_COUNTS = ["n_raw", "n_no_post_start", "n_in_occ", "n_in_occ_no_post_start", "n_in_occ_use",
-               "n_in_occ_use_no_post_start"]
+_PSM_COUNTS = ["n_raw", "n_no_post_start", "n_no_date", "n_end_unusable",
+               "n_in_occ", "n_in_occ_no_post_start", "n_in_occ_no_date", "n_in_occ_end_unusable",
+               "n_in_occ_from_end_in_period",
+               "n_in_occ_use", "n_in_occ_use_no_post_start", "n_in_occ_use_no_date", "n_in_occ_use_from_end_in_period"]
 PSM_SCHEMA = pa.schema([("year", _INT), ("source", _STR)] + [(c, _INT) for c in _PSM_COUNTS])
 WORDS_SCHEMA = pa.schema([("word", _STR), ("n", _INT)])
+GAP_SCHEMA = pa.schema([("year", _INT), ("bin", _STR), ("n", _INT)])
 
 _STAT_KEYS = ["n_tokens", "n_unmatched", "n_length_mismatch_rows"]
 
@@ -122,7 +135,7 @@ def _schemas(passthrough: dict[str, pa.DataType]) -> dict[str, pa.Schema]:
     """공고 단위 세 파일의 열 구성을 정한다. 연도나 행 묶음에 따라 형식이 바뀌지 않게 하기 위해서다."""
     id_type = passthrough["posting_id"]
     base = [(c, _BASE_DERIVED_TYPES[c] if c in _BASE_DERIVED_TYPES else passthrough[c])
-            for c in [*sample.BASE_COLUMNS, "n_skills"]]
+            for c in [*sample.BASE_COLUMNS, *_BASE_EXTRA_COLUMNS]]
     return {
         "base": pa.schema(base),
         "treat": pa.schema([("posting_id", id_type)] + [(c, _BOOL) for c in _TREAT_FLAGS]),
@@ -198,37 +211,89 @@ def _empty_frame(schema: pa.Schema) -> pd.DataFrame:
     return pd.DataFrame({f.name: pd.Series([], dtype=f.type.to_pandas_dtype()) for f in schema})
 
 
-def _post_start_counts(raw: pd.DataFrame, in_occ: np.ndarray, has_use: np.ndarray) -> pd.DataFrame:
-    """행 묶음 하나의 모든 공고를 수집 사이트별로 세어, 게시일(`post_start`)이 없는 공고 수를 함께 돌려준다.
+def _post_start_counts(raw: pd.DataFrame, b: pd.DataFrame, has_use: np.ndarray,
+                       date_columns: list[str]) -> pd.DataFrame:
+    """행 묶음 하나의 모든 공고를 수집 사이트별로 세어, 게시일과 관련된 공고 수를 함께 돌려준다.
 
-    `in_occ`는 분석 대상 세분류 여부, `has_use`는 생성형 AI 활용 숙련 보유 여부이며 `raw`와 위치로 맞춘다.
+    `b`는 `sample.build_posting_base`가 `raw`로 만든 기본 자료(같은 순서)이고, 그 `date_source`, `in_period`,
+    `in_occ`를 쓴다. `has_use`는 생성형 AI 활용 숙련 보유 여부이며 `raw`와 위치로 맞춘다. `date_columns`는
+    설정 `period.date_columns`이다. 세는 공고는 다음과 같다(`n_in_occ_*`는 그 가운데 분석 대상 세분류의 공고,
+    `n_in_occ_use_*`는 다시 그 가운데 생성형 AI 활용 숙련이 있는 공고).
+    - `no_post_start`: 첫 날짜 열에 게시일로 쓸 날짜가 없는 공고(비었거나 읽을 수 없는 값)
+    - `no_date`: `date_columns`의 어느 열에도 게시일로 쓸 날짜가 없는 공고(분석 기간 단계에서 빠진다)
+    - `end_unusable`: 첫 날짜 열에 날짜가 없고, 둘째 날짜 열에 값은 있지만 날짜로 쓸 수 없는 공고
+      (`sample.unusable_dates`. 날짜 열이 하나뿐이면 0)
+    - `from_end_in_period`: 첫 날짜 열에 날짜가 없어 뒤 열의 날짜를 게시일로 썼고, 그 날짜가 분석 기간 안인 공고
     """
-    no_date = raw["post_start"].isna().to_numpy(dtype=bool)
+    date_source = b["date_source"]
+    no_date = date_source.isna().to_numpy(dtype=bool)
+    no_first = (date_source != date_columns[0]).fillna(True).to_numpy(dtype=bool)
+    if len(date_columns) > 1:
+        end_unusable = no_first & sample.unusable_dates(raw, date_columns[1:2])[date_columns[1]].to_numpy(dtype=bool)
+    else:
+        end_unusable = np.zeros(len(raw), dtype=bool)
+    from_end_in_period = no_first & ~no_date & b["in_period"].to_numpy(dtype=bool)
+    in_occ = b["in_occ"].to_numpy(dtype=bool)
     occ_use = in_occ & has_use
     df = pd.DataFrame({
         "source": raw["source"].astype("string").fillna(MISSING_LABEL).to_numpy(),
         "n_raw": np.ones(len(raw), dtype="int64"),
-        "n_no_post_start": no_date.astype("int64"),
+        "n_no_post_start": no_first.astype("int64"),
+        "n_no_date": no_date.astype("int64"),
+        "n_end_unusable": end_unusable.astype("int64"),
         "n_in_occ": in_occ.astype("int64"),
-        "n_in_occ_no_post_start": (in_occ & no_date).astype("int64"),
+        "n_in_occ_no_post_start": (in_occ & no_first).astype("int64"),
+        "n_in_occ_no_date": (in_occ & no_date).astype("int64"),
+        "n_in_occ_end_unusable": (in_occ & end_unusable).astype("int64"),
+        "n_in_occ_from_end_in_period": (in_occ & from_end_in_period).astype("int64"),
         "n_in_occ_use": occ_use.astype("int64"),
-        "n_in_occ_use_no_post_start": (occ_use & no_date).astype("int64"),
+        "n_in_occ_use_no_post_start": (occ_use & no_first).astype("int64"),
+        "n_in_occ_use_no_date": (occ_use & no_date).astype("int64"),
+        "n_in_occ_use_from_end_in_period": (occ_use & from_end_in_period).astype("int64"),
     })
     return df.groupby("source", as_index=False).sum()
 
 
+def _post_end_gap_counts(raw: pd.DataFrame, in_occ: np.ndarray, date_columns: list[str]) -> dict[str, int]:
+    """분석 대상 세분류의 공고(`in_occ`, `raw`와 위치로 맞춘다) 가운데 `date_columns`의 첫 열과 둘째 열이 모두
+    날짜로 읽히는 공고를, 둘째 날짜에서 첫 날짜를 뺀 일수의 구간(`POST_END_GAP_BINS`)별로 센다.
+
+    {구간 이름: 공고 수}를 돌려주며, 공고가 없는 구간도 0으로 넣는다. `date_columns`에 열이 둘 이상 있어야 한다.
+    """
+    first, _ = sample.posting_date(raw, date_columns[:1])
+    second, _ = sample.posting_date(raw, date_columns[1:2])
+    both = in_occ & first.notna().to_numpy(dtype=bool) & second.notna().to_numpy(dtype=bool)
+    days = (second - first).dt.days.to_numpy()[both]
+    out = {}
+    for label, low, high in POST_END_GAP_BINS:
+        hit = np.ones(len(days), dtype=bool)
+        if low is not None:
+            hit &= days >= low
+        if high is not None:
+            hit &= days <= high
+        out[label] = int(hit.sum())
+    return out
+
+
 def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
-    """원자료를 한 번 훑어 중간 자료 여덟 파일(`OUTPUT_NAMES`)과 1단계 기록(`scan_meta.json`)을 `out_dir`에 쓰고
+    """원자료를 한 번 훑어 중간 자료 아홉 파일(`OUTPUT_NAMES`)과 1단계 기록(`scan_meta.json`)을 `out_dir`에 쓰고
     {이름: 경로}를 돌려준다.
 
-    `post_start_missing`은 공고 파일의 모든 공고를 파일 연도 × 수집 사이트별로 세어 게시일이 없는 공고 수를
-    적은 표이고, `sido_other_words`는 `base`에 들어간 공고 가운데 시도가 `기타`인 공고의 근무지 첫 낱말
+    `base`의 `text_len`은 본문(`treatment.text_columns`의 열을 공백 하나로 이은 글자열)의 글자 수이고, 본문이
+    없으면 0이다. `occ_year_all`의 `year`는 게시일(`sample.posting_date`)의 연도이며, 게시일을 정할 수 없으면 파일
+    연도이다. `kw_pattern_hits`는 키워드 사전(`strict`, `broad_extra`, `use`)의 표현마다 걸린 공고 수를 게시 연도별로
+    센 표이다. `strict`와 `broad_extra`는 `kw_broad`가 참인 공고 안에서, `use`는 `kw_use`가 참인 공고 안에서
+    제외 표현을 지운 뒤 센다. `post_start_missing`은 공고 파일의 모든 공고를 파일 연도 × 수집 사이트별로 세어
+    게시일과 관련된 공고 수(`_post_start_counts`)를 적은 표이다. `post_end_gap`은 분석 대상 세분류의 공고
+    가운데 `period.date_columns`의 첫 열과 둘째 열이 모두 날짜로 읽히는 공고를 파일 연도 × 두 날짜의 간격
+    구간(`POST_END_GAP_BINS`, 공고가 없는 구간도 0)별로 센 표이고, 날짜 열이 하나뿐이면 빈 표이다.
+    `sido_other_words`는 `base`에 들어간 공고 가운데 시도가 `기타`인 공고의 근무지 첫 낱말
     (`sample.region_first_word`, 20자까지)별 공고 수를 많은 순으로 200개까지 적은 표이다. 근무지 열 자체는
     `base`에 쓰지 않는다. `scan_meta.json`에는 실행을 시작하고 끝낸 시각, 실행을 시작할 때의 git 커밋과 git에 기록된
     파일에 커밋하지 않은 변경이 있었는지, 설정 가운데 `SCAN_CONFIG_KEYS` 항목의 값만 적는다(공고 단위 값은 적지 않는다).
 
     설정을 확인하고(`validate.validate_config`) 입력을 확인한 뒤 훑기 전에, `out_dir`에 있는 이 함수의 결과 파일
-    아홉 개와 그 `.part` 파일을 지운다(폴더의 다른 파일은 건드리지 않는다). 각 파일은 먼저 `.part`가 붙은
+    열 개와 그 `.part` 파일을 지운다(폴더의 다른 파일은 건드리지 않는다). 각 파일은 먼저 `.part`가 붙은
     이름으로 쓰고, 모든 연도를 끝까지 처리한 뒤에 정해진 이름으로 바꾼다(PermissionError가 나면 몇 번 다시
     해 본다). 이름 바꾸기까지 어느 단계에서든 멈추면 이번 실행의 결과 파일과 `.part` 파일을 모두 지우고
     예외를 다시 낸다. 그래서 `out_dir`에 남은 결과 파일은 끝까지 처리된 한 번의 실행에서 나온 것뿐이다.
@@ -241,6 +306,7 @@ def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
     years = [int(y) for y in cfg["data"]["years"]]
     postings_dir = root / "data" / "postings"
     text_cols = list(cfg["treatment"]["text_columns"])
+    date_cols = list(cfg["period"]["date_columns"])
     read_cols = list(dict.fromkeys(sample.RAW_COLUMNS + skills.raw_skill_columns()))
     if not text_cols:
         raise ValueError("cfg['treatment']['text_columns']가 비어 있습니다")
@@ -255,7 +321,7 @@ def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
     codes = treatment.agent_skill_codes(codebook, cfg)
     kws = treatment.keyword_lists(cfg)
     kw_cfg = cfg["treatment"]["keywords"]
-    labelled = [("strict", p) for p in kw_cfg["strict"]] + [("broad_extra", p) for p in kw_cfg["broad_extra"]]
+    labelled = [(d, p) for d in _KW_COUNT_FLAG for p in kw_cfg[d]]
 
     out = {name: out_dir / f"{name}.parquet" for name in OUTPUT_NAMES}
     out[META_NAME] = out_dir / f"{META_NAME}.json"
@@ -272,13 +338,16 @@ def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
             writers[name] = rawio.parquet_writer(parts[name], schemas[name])
 
         occ_pieces, stats_rows, base_ids, psm_pieces = [], [], [], []
-        hits = defaultdict(int)
+        hits = defaultdict(int)   # {(게시 연도, 처치 표시 열, 표현): 공고 수}
         other_words = defaultdict(int)
+        gap_counts = {}           # {파일 연도: {간격 구간: 공고 수}}. 날짜 열이 하나뿐이면 비어 있다
         for year in years:
             t0 = time.perf_counter()
             pf = files[year]
             acc = {"base": [], "treat": [], "skills_long": []}
             occ_year, psm_year = [], []
+            if len(date_cols) > 1:
+                gap_counts[year] = dict.fromkeys([label for label, _, _ in POST_END_GAP_BINS], 0)
             st = {"year": year, "n_raw": 0, "n_in_period": 0, "n_in_occ": 0, **{k: 0 for k in _STAT_KEYS}}
 
             for i in range(pf.num_row_groups):
@@ -290,7 +359,8 @@ def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
                 for k in _STAT_KEYS:
                     st[k] += s[k]
                 flags = treatment.skill_flags(long, codes, raw["posting_id"])
-                cal_year = pd.to_datetime(raw["post_start"]).dt.year.fillna(year).astype("int64")
+                b = sample.build_posting_base(raw, ked_firm, ksic_valid, cfg)
+                cal_year = b["year"].fillna(year).astype("int64")   # 게시일의 연도. 게시일을 정할 수 없으면 파일 연도
                 occ_year.append(pd.DataFrame({
                     "year": cal_year.to_numpy(),
                     "keco4": raw["keco_2025"].astype("string").fillna("NA").to_numpy(),
@@ -300,11 +370,15 @@ def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
                     "n_dev": flags["has_dev"].to_numpy(dtype="int64"),
                 }).groupby(["year", "keco4"], as_index=False).sum())
 
-                # 분석 기간과 분석 대상 직종에 드는 공고만 남긴다
-                b = sample.build_posting_base(raw, ked_firm, ksic_valid, cfg)
                 in_occ = b["in_occ"].to_numpy(dtype=bool)
-                # 모든 공고: 게시일이 없는 공고 수(분석 기간 단계에서 빠지는 공고)
-                psm_year.append(_post_start_counts(raw, in_occ, flags["has_use"].to_numpy(dtype=bool)))
+                # 모든 공고: 게시일과 관련된 공고 수(게시일을 정할 수 없는 공고는 분석 기간 단계에서 빠진다)
+                psm_year.append(_post_start_counts(raw, b, flags["has_use"].to_numpy(dtype=bool), date_cols))
+                # 분석 대상 세분류의 공고: 게시일과 마감일의 간격
+                if len(date_cols) > 1:
+                    for label, n in _post_end_gap_counts(raw, in_occ, date_cols).items():
+                        gap_counts[year][label] += n
+
+                # 분석 기간과 분석 대상 직종에 드는 공고만 남긴다
                 keep = b["in_period"].to_numpy(dtype=bool) & in_occ
                 st["n_in_period"] += int(b["in_period"].sum())
                 st["n_in_occ"] += int(keep.sum())
@@ -322,18 +396,22 @@ def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
                 b["n_skills"] = n_skills.reindex(b["posting_id"], fill_value=0).to_numpy(dtype="int64")
                 long = long[long["posting_id"].isin(b["posting_id"])].reset_index(drop=True)
 
-                # 남은 공고가 있는 행 묶음에서만 원문 열을 다시 읽는다. 원문은 여기서만 쓰고 저장하지 않는다.
+                # 남은 공고가 있는 행 묶음에서만 원문 열을 다시 읽는다. 원문은 여기서만 쓰고 글자 수만 저장한다.
                 text = _joined_text(pf.read_row_group(i, columns=text_cols).to_pandas(), text_cols)[keep]
                 text = text.reset_index(drop=True)
+                b["text_len"] = text.str.len().fillna(0).astype("int64").to_numpy()
                 tr = treatment.build_treat(b["posting_id"], text, long, codebook, cfg)
-                broad = tr["kw_broad"].to_numpy(dtype=bool)
-                if broad.any():
-                    t_broad = text[broad].reset_index(drop=True)
-                    y_broad = b["year"].astype("int64").to_numpy()[broad]
-                    for y in np.unique(y_broad):
-                        counts = treatment.pattern_counts(t_broad[y_broad == y], kws["broad"], kws["exclude"])
+                post_year = b["year"].astype("int64").to_numpy()
+                for flag, patterns in _KW_FLAG_PATTERNS.items():
+                    sel = tr[flag].to_numpy(dtype=bool)
+                    if not sel.any():
+                        continue
+                    t_sel = text[sel].reset_index(drop=True)
+                    y_sel = post_year[sel]
+                    for y in np.unique(y_sel):
+                        counts = treatment.pattern_counts(t_sel[y_sel == y], kws[patterns], kws["exclude"])
                         for p, n in counts.items():
-                            hits[(int(y), p)] += n
+                            hits[(int(y), flag, p)] += n
                 del text
 
                 acc["base"].append(_to_table(b, schemas["base"]))
@@ -370,11 +448,15 @@ def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
         else:
             occ = _empty_frame(OCC_SCHEMA)
         stats = pd.DataFrame(stats_rows, columns=STATS_SCHEMA.names)
-        kw_years = sorted(set(years) | {y for y, _ in hits})
+        kw_years = sorted(set(years) | {y for y, _, _ in hits})
         kw_hits = pd.DataFrame(
-            [(y, d, p, hits.get((y, p), 0)) for y in kw_years for d, p in labelled],
+            [(y, d, p, hits.get((y, _KW_COUNT_FLAG[d], p), 0)) for y in kw_years for d, p in labelled],
             columns=KW_SCHEMA.names,
         )
+        gap = pd.DataFrame([(y, label, n) for y, by_bin in gap_counts.items() for label, n in by_bin.items()],
+                           columns=GAP_SCHEMA.names)
+        if gap.empty:
+            gap = _empty_frame(GAP_SCHEMA)
         if psm_pieces:
             psm = (pd.concat(psm_pieces, ignore_index=True)[PSM_SCHEMA.names]
                    .sort_values(["year", "source"], ignore_index=True))
@@ -388,7 +470,7 @@ def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
             words = _empty_frame(WORDS_SCHEMA)
         for name, df, schema in (("occ_year_all", occ, OCC_SCHEMA), ("scan_stats", stats, STATS_SCHEMA),
                                  ("kw_pattern_hits", kw_hits, KW_SCHEMA), ("post_start_missing", psm, PSM_SCHEMA),
-                                 ("sido_other_words", words, WORDS_SCHEMA)):
+                                 ("sido_other_words", words, WORDS_SCHEMA), ("post_end_gap", gap, GAP_SCHEMA)):
             with rawio.parquet_writer(parts[name], schema) as w:
                 w.write_table(_to_table(df, schema))
 
@@ -437,7 +519,7 @@ _TIMING_BASE_COLUMNS = list(dict.fromkeys(["posting_id", "bzno", "n_skills", *_E
 
 
 def _require_interim(s0_dir: Path) -> None:
-    """1단계의 중간 자료 여덟 파일과 1단계 기록이 모두 있는지 확인한다. 없으면 없는 파일 이름을 적은 예외를 낸다."""
+    """1단계의 중간 자료 아홉 파일(`OUTPUT_NAMES`)과 1단계 기록이 모두 있는지 확인한다. 없으면 없는 파일 이름을 적은 예외를 낸다."""
     names = [f"{n}.parquet" for n in OUTPUT_NAMES] + [f"{META_NAME}.json"]
     missing = [n for n in names if not (s0_dir / n).is_file()]
     if missing:
