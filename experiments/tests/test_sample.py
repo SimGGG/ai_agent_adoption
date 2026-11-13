@@ -84,12 +84,42 @@ def test_merge_sido():
     assert pd.isna(out.iloc[5])
 
 
-def test_base_uses_post_end_when_post_start_is_missing(base):       # base: 이 파일의 기존 고정물
+def test_posting_date_strips_whitespace():
+    raw = pd.DataFrame({"post_start": ["2025-05-10 ", "2025-05-10\t", " 2025-05-10"], "post_end": [None, None, None]})
+    date, source = sample.posting_date(raw, ["post_start", "post_end"])
+    assert date.dt.strftime("%Y-%m-%d").tolist() == ["2025-05-10"] * 3 and source.tolist() == ["post_start"] * 3
+
+
+def test_unusable_dates_marks_present_but_unusable_values():
+    import datetime as dt
+    raw = pd.DataFrame({
+        "post_start": ["2025-03-02", None, "", "   ", "날짜아님", "9999-12-31"],
+        "post_end": [dt.date(2025, 4, 1), dt.date(9999, 12, 31), dt.date(1, 1, 1), None, None, dt.date(2400, 3, 19)],
+    })
+    bad = sample.unusable_dates(raw, ["post_start", "post_end"])
+    assert bad["post_start"].tolist() == [False, False, False, False, True, True]
+    assert bad["post_end"].tolist() == [False, True, True, False, False, True]
+    assert bad.index.equals(raw.index)
+
+
+def test_unusable_dates_names_missing_columns():
+    with pytest.raises(KeyError, match="post_end"):
+        sample.unusable_dates(pd.DataFrame({"post_start": ["2025-03-02"]}), ["post_start", "post_end"])
+
+
+def test_base_uses_post_end_when_post_start_is_missing(base, synth_data):       # base: 이 파일의 기존 고정물
     """가상 공고 가운데 게시일이 없고 마감일만 있는 공고는 마감일의 연도·월·기간을 갖고 분석 기간 안에 든다.
     둘 다 없는 공고는 연도가 결측이고 분석 기간 밖이다."""
     by_id = base   # 이 파일의 base 고정물은 이미 posting_id를 번호표로 쓴다
     assert by_id.loc[synth.ID_END_ONLY, "date_source"] == "post_end"
     assert by_id.loc[synth.ID_END_ONLY, "in_period"] and by_id.loc[synth.ID_END_ONLY, "period"] == synth.PERIOD_NAME
+    # 과제 3 수정 1차: 월, 분기, 업력도 마감일로 계산한다(업력 = 마감일의 연도 - KED 설립 연도)
+    end = pd.Timestamp(synth._POST_END_WITHOUT_START[synth.ID_END_ONLY])
+    bzno = next(p[2] for p in synth._POSTINGS if p[0] == synth.ID_END_ONLY)
+    k = ked.extract_ked_firm(synth_data["ked_firm"]).set_index("bzno")
+    assert by_id.loc[synth.ID_END_ONLY, "month"] == end.month
+    assert by_id.loc[synth.ID_END_ONLY, "quarter"] == f"{end.year}Q{end.quarter}"
+    assert by_id.loc[synth.ID_END_ONLY, "firm_age"] == end.year - k.loc[bzno, "ked_estab_year"]
     assert pd.isna(by_id.loc[synth.ID_NO_DATE, "date_source"]) and pd.isna(by_id.loc[synth.ID_NO_DATE, "year"])
     assert not by_id.loc[synth.ID_NO_DATE, "in_period"]
     assert base.loc[base["in_period"], "period"].notna().all()

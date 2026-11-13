@@ -80,26 +80,60 @@ def merge_sido(sido: pd.Series, merge: dict[str, list[str]]) -> pd.Series:
     return s.map(to_group).astype("string").fillna(s)
 
 
+def _require_columns(raw: pd.DataFrame, columns: list[str]) -> None:
+    absent = [c for c in columns if c not in raw.columns]
+    if absent:
+        raise KeyError(f"게시일을 정할 열이 공고 자료에 없습니다: {', '.join(absent)}")
+
+
+def _parse_dates(values: pd.Series) -> tuple[pd.Series, pd.Series]:
+    """열 하나를 날짜로 읽어 (날짜, 값이 있는지)를 돌려준다. `posting_date`와 `unusable_dates`가 함께 쓴다.
+
+    문자열은 앞뒤 공백을 지운 뒤 ISO 8601 형식으로 읽고, 지운 뒤 빈 문자열은 값이 없는 것으로 본다.
+    날짜는 시각을 버리고 `datetime64[ns]`로 맞추며, 읽을 수 없는 값과 그 범위(1677~2262년) 밖의 날짜는 결측이다.
+    """
+    s = values
+    if pd.api.types.infer_dtype(s, skipna=True) in ("string", "mixed"):
+        s = s.astype(object).map(lambda v: (v.strip() or None) if isinstance(v, str) else v)
+    present = s.notna()
+    d = pd.to_datetime(s, errors="coerce", format="ISO8601")
+    d = d.where((d >= pd.Timestamp.min) & (d <= pd.Timestamp.max)).astype("datetime64[ns]").dt.normalize()
+    return d, present
+
+
 def posting_date(raw: pd.DataFrame, columns: list[str]) -> tuple[pd.Series, pd.Series]:
     """공고마다 게시일로 쓸 날짜와 그 날짜를 가져온 열 이름을 돌려준다(설계 문서 결정 25).
 
     `columns`의 순서대로 처음으로 날짜가 있는 열의 날짜를 쓴다. 시각은 버리고 날짜만 남긴다.
-    읽을 수 없는 값과 `datetime64[ns]`로 나타낼 수 없는 날짜(1677~2262년 밖, 예: 9999-12-31)는 날짜가
-    없는 것으로 본다. 어느 열에도 날짜가 없으면 날짜와 열 이름 모두 결측이다.
-    문자열은 ISO 8601 형식(예: 2025-03-02, 2025-03-02 13:00:00)으로 읽는다.
+    날짜로 쓰는 값: 날짜 객체와 날짜·시각 값, 그리고 앞뒤 공백을 지운 뒤 ISO 8601 형식으로 읽히는 문자열
+    (예: `2025-03-02`, `2025-03-02 13:00:00`, `20250302`). 그 밖의 값과 `datetime64[ns]`로 나타낼 수 있는
+    범위(1677~2262년) 밖의 날짜(예: 0001-01-01, 9999-12-31)는 날짜가 없는 것으로 본다. 값은 있지만 이렇게
+    날짜로 쓰지 못한 칸은 `unusable_dates`로 셀 수 있다. 어느 열에도 날짜가 없으면 날짜와 열 이름 모두 결측이다.
+    `columns`의 열이 `raw`에 없으면 없는 열 이름을 적은 KeyError를 낸다.
     """
-    absent = [c for c in columns if c not in raw.columns]
-    if absent:
-        raise KeyError(f"게시일을 정할 열이 공고 자료에 없습니다: {', '.join(absent)}")
+    _require_columns(raw, columns)
     date = pd.Series(pd.NaT, index=raw.index, dtype="datetime64[ns]")
     source = pd.Series(pd.NA, index=raw.index, dtype="string")
     for c in columns:
-        d = pd.to_datetime(raw[c], errors="coerce", format="ISO8601")
-        d = d.where((d >= pd.Timestamp.min) & (d <= pd.Timestamp.max)).astype("datetime64[ns]").dt.normalize()
+        d, _ = _parse_dates(raw[c])
         take = date.isna() & d.notna()
         date = date.where(~take, d)
         source = source.where(~take, c)
     return date, source
+
+
+def unusable_dates(raw: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """`columns`의 열마다, 값은 있지만 `posting_date`가 날짜로 쓰지 못하는 칸을 참으로 표시한 표를 돌려준다.
+
+    값이 있다는 것은 결측이 아니고 빈 문자열이나 공백뿐인 문자열도 아니라는 뜻이다. 날짜로 쓰지 못하는 값은
+    읽을 수 없는 글자와 `posting_date`가 받는 범위 밖의 날짜이다. 번호표는 `raw`와 같다.
+    """
+    _require_columns(raw, columns)
+    out = {}
+    for c in columns:
+        d, present = _parse_dates(raw[c])
+        out[c] = (present & d.isna()).to_numpy(dtype=bool)
+    return pd.DataFrame(out, index=raw.index)
 
 
 def period_name(year: pd.Series, groups: list[dict]) -> pd.Series:
