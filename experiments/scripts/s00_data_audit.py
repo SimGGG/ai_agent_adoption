@@ -63,7 +63,7 @@ _BASE_DERIVED_TYPES = {
     "ked_matched": _BOOL, "firm_age": _INT, "ked_size": _STR, "ked_ipo": _STR, "ked_venture": _STR,
     "in_period": _BOOL, "in_occ": _BOOL, "has_bzno": _BOOL, "n_skills": _INT,
 }
-_TREAT_FLAGS = ["kw_strict", "kw_broad", "has_dev", "has_use", "treat_code", "treat_all"]
+_TREAT_FLAGS = ["kw_strict", "kw_broad", "kw_use", "has_dev", "has_use", "treat_code", "treat_all"]
 
 OCC_SCHEMA = pa.schema([("year", _INT), ("keco4", _STR), ("n", _INT), ("n_skill", _INT),
                         ("n_use", _INT), ("n_dev", _INT)])

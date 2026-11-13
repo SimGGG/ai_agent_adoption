@@ -103,7 +103,7 @@ def test_base_merges_sido_and_blanks_ksic_not_in_table(base):
     assert (base["ksic5"].notna() & base["ksic_sub"].isna()).any()
 
 def test_base_keeps_every_row_and_flags(base):
-    assert len(base) == 14                               # 과제 3에서 p13, p14를 더해 12에서 바꿨다
+    assert len(base) == 16                               # 과제 3에서 p13, p14를 더해 12에서 14로, 과제 3A에서 p15, p16을 더해 16으로 바꿨다
     assert sorted(base.index[~base.in_occ]) == ["p07", "p08"]
     assert sorted(base.index[~base.has_bzno]) == ["p04"]
     assert sorted(base.index[~base.in_period]) == [synth.ID_NO_DATE]   # 과제 3: 게시일과 마감일이 모두 없는 공고
@@ -121,12 +121,13 @@ def test_exclusions_in_order(base, synth_data):
     has_skill = pd.Series(True, index=base.index)
     has_skill[["p06", "p10"]] = False
     kept, counts = sample.apply_exclusions(base.reset_index(), synth_data["cfg"], has_skill.reset_index(drop=True))
-    assert sorted(kept.posting_id) == ["p01", "p02", "p03", "p05", "p09", "p11", "p12", "p13"]
+    # p15, p16: 과제 3A에서 더한 공고
+    assert sorted(kept.posting_id) == ["p01", "p02", "p03", "p05", "p09", "p11", "p12", "p13", "p15", "p16"]
     # 과제 3: 연도가 결측인 공고(p14)가 생겨 건수 표에 연도가 결측인 행이 있으므로 단계별로 더해 본다
     c = counts.groupby("step")[["n_dropped", "n_after"]].sum()
     assert c.loc["in_period", "n_dropped"] == 1
     assert c.loc["in_occ", "n_dropped"] == 2 and c.loc["has_bzno", "n_dropped"] == 1 and c.loc["has_skill", "n_dropped"] == 2
-    assert c.loc["has_skill", "n_after"] == 8
+    assert c.loc["has_skill", "n_after"] == 10   # 과제 3A에서 p15, p16을 더해 8에서 바꿨다
 
 def test_period_filter(synth_data):
     cfg = synth_data["cfg"]
@@ -152,7 +153,8 @@ def test_apply_exclusions_keeps_input_index_labels(base, synth_data):
     b.index = b.index * 10 + 3
     kept, _ = sample.apply_exclusions(b, synth_data["cfg"])
     assert kept.index.tolist() == b.index[b["in_period"] & b["in_occ"] & b["has_bzno"]].tolist()
-    assert kept.index.tolist() == [3, 13, 23, 43, 53, 83, 93, 103, 113, 123]   # 123: 과제 3에서 더한 p13
+    # 123: 과제 3에서 더한 p13. 143, 153: 과제 3A에서 더한 p15, p16
+    assert kept.index.tolist() == [3, 13, 23, 43, 53, 83, 93, 103, 113, 123, 143, 153]
 
 def test_missing_bzno_never_joins(synth_data):
     raw = pd.concat(rawio.iter_postings(synth_data["postings_dir"], 2025, sample.RAW_COLUMNS))
@@ -161,7 +163,7 @@ def test_missing_bzno_never_joins(synth_data):
                         "ked_size": pd.array(["BAD"], dtype="string"), "ked_ipo": pd.array(["Y"], dtype="string"),
                         "ked_venture": pd.array(["Y"], dtype="string")})
     b = sample.build_posting_base(raw, pd.concat([k, bad], ignore_index=True), set(), synth_data["cfg"]).set_index("posting_id")
-    assert len(b) == 14                                  # 과제 3에서 p13, p14를 더해 12에서 바꿨다
+    assert len(b) == 16                                  # 과제 3에서 p13, p14를 더해 12에서 14로, 과제 3A에서 p15, p16을 더해 16으로 바꿨다
     assert not b.loc["p04", "ked_matched"]
     assert pd.isna(b.loc["p04", "ked_size"]) and pd.isna(b.loc["p04", "firm_age"])
     assert b.loc["p01", "ked_matched"] and b.loc["p01", "firm_age"] == 15

@@ -151,7 +151,7 @@ def test_rename_is_retried_on_permission_error(synth_data, tmp_path, monkeypatch
     out = s00.scan(synth_data["cfg"], synth_data["root"], tmp_path / "s0")
     assert len(tries) == 9 and set(tries.values()) == {3}
     assert all(p.exists() for p in out.values())
-    assert len(pd.read_parquet(out["base"])) == 11   # 과제 3: p13이 더해져 10에서 바꿨다
+    assert len(pd.read_parquet(out["base"])) == 13   # 과제 3: p13이 더해져 10에서 11로, 과제 3A: p15, p16이 더해져 13으로 바꿨다
 
 
 def test_rename_gives_up_and_cleans_up(synth_data, tmp_path, monkeypatch):

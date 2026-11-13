@@ -15,7 +15,7 @@ def test_exclusion_table_matches_fixture(synth_data, tmp_path):
     _, t = run(synth_data, tmp_path)
     c = t["t01_exclusions"].query("year == 2025").set_index("step")
     assert c.loc["in_occ", "n_dropped"] == 2 and c.loc["has_bzno", "n_dropped"] == 1
-    assert c.loc["has_skill", "n_dropped"] == 2 and c.loc["has_skill", "n_after"] == 8   # 과제 3: p13을 더해 7에서 바꿨다
+    assert c.loc["has_skill", "n_dropped"] == 2 and c.loc["has_skill", "n_after"] == 10   # 과제 3: p13을 더해 7에서 8로, 과제 3A: p15, p16을 더해 10으로 바꿨다
 
 def test_treated_counts_by_period(synth_data, tmp_path):
     _, t = run(synth_data, tmp_path)
@@ -85,7 +85,8 @@ def _larger_sample(n=400, n_firms=40, n_use=60, seed=0):
     })
     base["quarter"] = "2025Q" + ((base["month"] - 1) // 3 + 1).astype(str)
     has_use = np.arange(n) < n_use
-    treat = pd.DataFrame({"posting_id": ids, "kw_strict": False, "kw_broad": False, "has_dev": False,
+    # kw_use: 과제 3A에서 더한 열(처치 정의를 고르려면 있어야 한다)
+    treat = pd.DataFrame({"posting_id": ids, "kw_strict": False, "kw_broad": False, "kw_use": False, "has_dev": False,
                           "has_use": has_use, "treat_code": has_use, "treat_all": has_use})
     # S1은 짝수 번째, S2는 3의 배수 번째, S3는 둘 다 아닌 공고에 둔다(모든 공고에 숙련이 하나 이상 있다).
     rows = [(pid, code, "occupation") for i, pid in enumerate(ids)
@@ -132,8 +133,9 @@ def test_report_numbers_keep_small_rates_and_csv_keeps_full_precision(synth_data
     assert all("e" not in f(v).lower() for v in (4e-05, 1.234e-07, 0.00049))
     # CSV에는 보고서용으로 줄인 값이 아니라 계산한 값 그대로가 들어간다
     csv = pd.read_csv(tmp_path / "s0" / "tables" / "t04_bzno_ked_by_treatment.csv", encoding="utf-8-sig")
-    # 과제 3: KED와 결합되는 비교 공고 p13을 더해 5 / 7에서 바꿨다
-    assert csv.loc[csv["has_use"] == False, "ked_matched_rate"].iloc[0] == pytest.approx(6 / 8, rel=1e-12)
+    # 과제 3: KED와 결합되는 비교 공고 p13을 더해 5 / 7에서 6 / 8로 바꿨다. 과제 3A: KED와 결합되는 p15와
+    # 결합되지 않는 p16(1000000005는 KED 가상 파일에서 버려진 행)을 더해 7 / 10으로 바꿨다
+    assert csv.loc[csv["has_use"] == False, "ked_matched_rate"].iloc[0] == pytest.approx(7 / 10, rel=1e-12)
 
 
 # 아래는 과제 10 수정(첫 실제 자료 실행에서 드러난 문제)에서 더한 시험이다.
@@ -149,8 +151,9 @@ def test_post_start_missing_and_other_region_words_in_report(synth_data, tmp_pat
     y = m[m["level"] == "연도"].set_index("year")
     assert len(y) == 1 and pd.isna(y.loc[2025, "source"])
     # 과제 3: 게시일이 없는 가상 공고 p13, p14를 더해 12, 2, 2 / 12에서 바꿨다
-    assert y.loc[2025, "n_raw"] == 14 and y.loc[2025, "n_no_post_start"] == 4
-    assert y.loc[2025, "no_post_start_rate"] == pytest.approx(4 / 14)
+    # 과제 3A: 게시일이 있는 공고 p15, p16을 더해 14, 4 / 14에서 16, 4 / 16으로 바꿨다
+    assert y.loc[2025, "n_raw"] == 16 and y.loc[2025, "n_no_post_start"] == 4
+    assert y.loc[2025, "no_post_start_rate"] == pytest.approx(4 / 16)
     assert y.loc[2025, "in_occ_use_no_post_start_rate"] == pytest.approx(1 / 3)
     s = m[m["level"] == "연도·수집 사이트"]
     assert s["source"].tolist() == ["잡사이트A", "잡사이트B"]   # 게시일 없는 공고가 있는 사이트만, 건수가 같으면 이름 순
@@ -188,9 +191,10 @@ def test_source_rows_sorted_by_count_within_year(synth_data, tmp_path):
     _, t = run(synth_data, tmp_path)
     s = t["t05_source"]
     # 과제 3에서 잡사이트A의 공고 p13이 더해져 잡사이트A와 C가 4건으로 같아졌다. 건수가 같으면 이름 순이고,
-    # 이름 순이었다면 3건인 잡사이트B가 C보다 앞에 온다.
+    # 이름 순이었다면 3건인 잡사이트B가 C보다 앞에 온다. 과제 3A에서 잡사이트C의 p15와 잡사이트A의 p16이 더해져
+    # 두 사이트가 5건으로 같다.
     s25 = s[s["year"] == 2025]
-    assert s25["source"].tolist() == ["잡사이트A", "잡사이트C", "잡사이트B"] and s25["n"].tolist() == [4, 4, 3]
+    assert s25["source"].tolist() == ["잡사이트A", "잡사이트C", "잡사이트B"] and s25["n"].tolist() == [5, 5, 3]
     csv = pd.read_csv(tmp_path / "s0" / "tables" / "t05_source.csv", encoding="utf-8-sig")
     assert csv["source"].tolist() == ["잡사이트A", "잡사이트C", "잡사이트B"]
 
@@ -206,7 +210,7 @@ def test_sparse_grid_uses_the_analysis_sample(synth_data, tmp_path):
     long = skills.drop_codes(pd.read_parquet(d / "skills_long.parquet"), codes["dev"] | codes["use"])
     timing = s00.time_outcome_model(pd.read_parquet(d / "base.parquet"), pd.read_parquet(d / "treat.parquet"), long, cfg)
     assert row["n_skills_kept"].iloc[0] == timing["n_skills_kept"] == 1   # SM-01-0001 (처치 공고 p02)
-    assert row["n_postings"].iloc[0] == 8      # 네 단계를 모두 통과한 공고: p01 p02 p03 p05 p09 p11 p12 p13(과제 3)
+    assert row["n_postings"].iloc[0] == 10     # 네 단계를 모두 통과한 공고: p01 p02 p03 p05 p09 p11 p12 p13(과제 3) p15 p16(과제 3A)
     assert row["n_treated"].iloc[0] == 2       # p02, p05 (p04는 사업자번호가 없어 빠진다)
 
 
@@ -227,13 +231,14 @@ def test_postings_with_only_agent_skill_codes(synth_data, tmp_path):
     # 네 단계를 통과한 공고 p01 p02 p03 p05 p09 p11 p12 p13 가운데 p05는 숙련이 AI 에이전트 숙련코드(IT-05-0413,
     # IT-05-0410)뿐이어서, 54개 코드를 빼면 결과변수로 쓰는 숙련이 하나도 없다.
     # 과제 3: p13을 더해 전체 공고 수를 7에서 8로, 비율을 1 / 7에서 1 / 8로 바꿨다.
+    # 과제 3A: p15, p16을 더해 전체 공고 수를 10으로, 비율을 1 / 10으로 바꿨다.
     s00, t = run(synth_data, tmp_path)
     e = t["t03e_no_outcome_skill"]
     assert list(e.columns) == ["group", "n", "n_no_outcome_skill", "no_outcome_skill_rate"]
     g = e.set_index("group")
     assert g.index.tolist() == ["전체", "has_use", "has_dev", "treat_code"]
-    assert g["n"].tolist() == [8, 2, 2, 3] and g["n_no_outcome_skill"].tolist() == [1, 1, 1, 1]
-    assert g.loc["전체", "no_outcome_skill_rate"] == pytest.approx(1 / 8)
+    assert g["n"].tolist() == [10, 2, 2, 3] and g["n_no_outcome_skill"].tolist() == [1, 1, 1, 1]
+    assert g.loc["전체", "no_outcome_skill_rate"] == pytest.approx(1 / 10)
     text = s00.write_report(t, _NO_TIMING, synth_data["cfg"], tmp_path / "report.md", commit="c").read_text(encoding="utf-8")
     assert text.index("### `t03d_match_stats`") < text.index("### `t03e_no_outcome_skill`") < text.index("## 4. ")
     assert "저자가 정한다" in s00._table_notes(synth_data["cfg"])["t03e_no_outcome_skill"]

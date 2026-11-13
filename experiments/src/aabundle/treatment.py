@@ -2,6 +2,7 @@
 
 처치 공고는 두 가지 근거로 표시한다. 하나는 공고 본문에 AI 에이전트 관련 키워드가 있는 경우이고,
 다른 하나는 AI 에이전트 숙련 코드가 붙은 경우이다. 숙련 코드는 개발 숙련과 생성형 AI 활용 숙련으로 나눈다.
+공고 본문에 생성형 AI 활용 표현이 있는지도 따로 표시한다(`kw_use`). 이 표시가 있는 공고는 비교 공고에서 뺀다.
 키워드 목록과 숙련 코드 선택 규칙은 모두 `config.yaml`의 `treatment` 항목에서 읽는다.
 공고 본문은 판별에만 쓰고 결과에 담지 않는다.
 """
@@ -10,7 +11,7 @@ from collections.abc import Sequence
 import numpy as np
 import pandas as pd
 
-DEFINITIONS = ("all", "dev", "use", "keyword", "code")
+DEFINITIONS = ("all", "dev", "use", "keyword", "code", "use_keyword", "use_any")
 
 
 def flag_treatment(text, include, exclude=()):
@@ -21,12 +22,13 @@ def flag_treatment(text, include, exclude=()):
 
 
 def keyword_lists(cfg: dict) -> dict:
-    """엄격 목록, 넓은 목록(엄격 목록 + 추가 표현), 제외 목록을 돌려준다."""
+    """엄격 목록, 넓은 목록(엄격 목록 + 추가 표현), 제외 목록, 생성형 AI 활용 표현 목록을 돌려준다."""
     kw = cfg["treatment"]["keywords"]
     return {
         "strict": list(kw["strict"]),
         "broad": list(kw["strict"]) + list(kw["broad_extra"]),
         "exclude": list(kw["exclude"]),
+        "use": list(kw["use"]),
     }
 
 
@@ -85,6 +87,7 @@ def build_treat(posting_ids: pd.Series, text: pd.Series, long: pd.DataFrame,
     """공고마다 처치 표시 열을 만든다(모두 bool, 입력 순서 그대로, 새 RangeIndex).
 
     `posting_ids`와 `text`는 위치로 맞춘다. 본문이 결측인 공고는 키워드에 걸리지 않는다.
+    `kw_use`는 제외 표현을 지운 뒤 생성형 AI 활용 표현 목록에 걸리는지이며, `treat_all`에는 넣지 않는다.
     """
     if len(posting_ids) != len(text):
         raise ValueError(f"공고 번호와 본문의 길이가 다릅니다: {len(posting_ids)} != {len(text)}")
@@ -94,6 +97,7 @@ def build_treat(posting_ids: pd.Series, text: pd.Series, long: pd.DataFrame,
     out = pd.DataFrame({"posting_id": ids})
     out["kw_strict"] = flag_treatment(txt, kws["strict"], kws["exclude"]).astype(bool).to_numpy()
     out["kw_broad"] = flag_treatment(txt, kws["broad"], kws["exclude"]).astype(bool).to_numpy()
+    out["kw_use"] = flag_treatment(txt, kws["use"], kws["exclude"]).astype(bool).to_numpy()
     flags = skill_flags(long, agent_skill_codes(codebook, cfg), ids)
     out["has_dev"] = flags["has_dev"].to_numpy()
     out["has_use"] = flags["has_use"].to_numpy()
@@ -105,15 +109,20 @@ def build_treat(posting_ids: pd.Series, text: pd.Series, long: pd.DataFrame,
 def select_arms(treat: pd.DataFrame, definition: str, keyword_col: str = "kw_strict") -> pd.Series:
     """처치 공고는 1, 비교 공고는 0, 어느 쪽도 아니면 결측인 `Int8` 열을 돌려준다.
 
-    비교 공고는 어떤 정의에서도 같다: 키워드에 걸리지 않고 두 종류의 AI 에이전트 숙련도 없는 공고.
+    처치 공고는 정의마다 다르다. `use_keyword`는 생성형 AI 활용 표현에 걸린 공고(`kw_use`)이고,
+    `use_any`는 생성형 AI 활용 숙련이 있거나 생성형 AI 활용 표현에 걸린 공고이다.
+    비교 공고는 어떤 정의에서도 같다: `keyword_col`의 키워드와 생성형 AI 활용 표현에 모두 걸리지 않고,
+    두 종류의 AI 에이전트 숙련도 없는 공고. `treat`에 `kw_use` 열이 없으면 `KeyError`를 낸다.
     """
     if definition not in DEFINITIONS:
         raise ValueError(f"알 수 없는 처치 정의입니다: {definition!r} (가능: {DEFINITIONS})")
     kw = treat[keyword_col].to_numpy(dtype=bool)
     dev = treat["has_dev"].to_numpy(dtype=bool)
     use = treat["has_use"].to_numpy(dtype=bool)
-    treated = {"all": kw | dev | use, "dev": dev, "use": use, "keyword": kw, "code": dev | use}[definition]
-    comparison = ~kw & ~dev & ~use
+    kw_use = treat["kw_use"].to_numpy(dtype=bool)
+    treated = {"all": kw | dev | use, "dev": dev, "use": use, "keyword": kw, "code": dev | use,
+               "use_keyword": kw_use, "use_any": use | kw_use}[definition]
+    comparison = ~kw & ~dev & ~use & ~kw_use
     values = np.where(treated, 1, np.where(comparison, 0, -1))
     arr = pd.array(values, dtype="Int8")
     arr[values == -1] = pd.NA

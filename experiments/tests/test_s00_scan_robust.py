@@ -37,7 +37,7 @@ def _two_year_cfg(synth_data):
 
 
 def test_scan_promotes_column_types_across_years(synth_data, tmp_path):
-    n = 14   # 가상 공고 수(과제 3에서 12에서 바꿨다)
+    n = 16   # 가상 공고 수(과제 3에서 12에서 14로, 과제 3A에서 16으로 바꿨다)
     # 2023년: career_type은 값이 하나도 없어 null 형식, dup_count는 정수
     _year_file(synth_data, 2023, "a", {"career_type": pa.nulls(n)})
     # 2024년: career_type은 문자열, dup_count는 결측과 소수가 있는 실수
@@ -51,17 +51,17 @@ def test_scan_promotes_column_types_across_years(synth_data, tmp_path):
     assert schema.field("dup_count").type == pa.float64()
     assert schema.field("career_type").type == pa.string()
     base = pd.read_parquet(out["base"]).set_index("posting_id")
-    assert len(base) == 22 and set(base["year"]) == {2023, 2024}   # 과제 3: 연도마다 p13이 더해져 20에서 바꿨다
+    assert len(base) == 26 and set(base["year"]) == {2023, 2024}   # 과제 3: 연도마다 p13이 더해져 20에서 22로, 과제 3A: p15, p16이 더해져 26으로 바꿨다
     assert base.loc["b01", "dup_count"] == 2.5 and pd.isna(base.loc["b02", "dup_count"])
     assert base.loc["a01", "dup_count"] == 1.0
     assert base.loc[base["year"] == 2023, "career_type"].isna().all()
     assert base.loc[base["year"] == 2024, "career_type"].notna().all()
     stats = pd.read_parquet(out["scan_stats"]).set_index("year")
-    assert stats.loc[2023, "n_in_occ"] == 11 and stats.loc[2024, "n_in_occ"] == 11   # 과제 3: p13이 더해져 10에서 바꿨다
+    assert stats.loc[2023, "n_in_occ"] == 13 and stats.loc[2024, "n_in_occ"] == 13   # 과제 3: p13이 더해져 10에서 11로, 과제 3A: p15, p16이 더해져 13으로 바꿨다
 
 
 def test_scan_stops_before_writing_when_types_cannot_be_matched(synth_data, tmp_path):
-    n = 14   # 가상 공고 수(과제 3에서 12에서 바꿨다)
+    n = 16   # 가상 공고 수(과제 3에서 12에서 14로, 과제 3A에서 16으로 바꿨다)
     _year_file(synth_data, 2023, "a", {})
     _year_file(synth_data, 2024, "b", {"ai_peripheral": pa.array(["예"] * n, pa.string())})
     out_dir = tmp_path / "s0"
@@ -129,4 +129,4 @@ def test_failed_scan_leaves_no_stale_or_partial_files(synth_data, tmp_path, monk
     out = mod.scan(synth_data["cfg"], synth_data["root"], out_dir)
     out = mod.scan(synth_data["cfg"], synth_data["root"], out_dir)
     assert _left(out_dir) == sorted([f"{name}.parquet" for name in OUT_NAMES] + ["scan_meta.json"])
-    assert len(pd.read_parquet(out["base"])) == 11   # 과제 3: p13이 더해져 10에서 바꿨다
+    assert len(pd.read_parquet(out["base"])) == 13   # 과제 3: p13이 더해져 10에서 11로, 과제 3A: p15, p16이 더해져 13으로 바꿨다

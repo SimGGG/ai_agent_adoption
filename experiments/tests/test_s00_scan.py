@@ -14,17 +14,18 @@ def test_scan_outputs(synth_data, tmp_path):
     stats = pd.read_parquet(out["scan_stats"]).set_index("year")
 
     # 13: 과제 3에서 더한 마감일만 있는 공고. 날짜가 없는 p14는 분석 기간 단계에서 빠진다
-    assert sorted(base.posting_id) == [f"p{i:02d}" for i in (1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13)]
+    # 15, 16: 과제 3A에서 더한 공고(생성형 AI 활용 키워드만 있는 공고, 본문에 Fulfillment가 있는 공고)
+    assert sorted(base.posting_id) == [f"p{i:02d}" for i in (1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 15, 16)]
     assert sorted(treat.posting_id) == sorted(base.posting_id)
     assert set(long.posting_id) <= set(base.posting_id)
     assert base.set_index("posting_id").loc["p12", "n_skills"] == 2
     assert base.set_index("posting_id").loc["p10", "n_skills"] == 0
 
     o = occ.set_index("keco4")
-    assert o.loc["0262", "n"] == 6 and o.loc["0262", "n_use"] == 2       # p02, p04 (n: 과제 3에서 p14를 더해 5에서 바꿨다)
+    assert o.loc["0262", "n"] == 7 and o.loc["0262", "n_use"] == 2       # p02, p04 (n: 과제 3에서 p14를 더해 5에서 6으로, 과제 3A에서 p15를 더해 7로 바꿨다)
     assert o.loc["1332", "n_use"] == 1 and o.loc["1332", "n_dev"] == 2   # p05 / p01, p05
     assert o.loc["9052", "n"] == 1 and o.loc["NA", "n"] == 1
-    assert stats.loc[2025, "n_raw"] == 14 and stats.loc[2025, "n_in_occ"] == 11   # 과제 3: p13, p14를 더해 12, 10에서 바꿨다
+    assert stats.loc[2025, "n_raw"] == 16 and stats.loc[2025, "n_in_occ"] == 13   # 과제 3: p13, p14를 더해 12, 10에서 14, 11로, 과제 3A: p15, p16을 더해 16, 13으로 바꿨다
     assert stats.loc[2025, "n_unmatched"] == 1
 
     kw = pd.read_parquet(out["kw_pattern_hits"]).set_index("pattern")
@@ -65,8 +66,8 @@ def test_scan_counts_postings_without_post_start_and_other_region_words(synth_da
     assert m["n_no_post_start"].sum() == len(MISSING_POST_START) + 2          # + p13, p14
     s = m.set_index("source")
     assert s.loc["잡사이트B"].drop("year").tolist() == [5, 2, 4, 2, 2, 1]   # p02, p05, p08, p11, p14
-    assert s.loc["잡사이트A"].drop("year").tolist() == [5, 2, 4, 1, 1, 0]   # p01, p04, p07, p10, p13
-    assert m["n_in_occ"].sum() == 12 and m["n_in_occ_use"].sum() == 3       # 게시일과 관계없이 센다
+    assert s.loc["잡사이트A"].drop("year").tolist() == [6, 2, 5, 1, 1, 0]   # p01, p04, p07, p10, p13, p16(과제 3A)
+    assert m["n_in_occ"].sum() == 14 and m["n_in_occ_use"].sum() == 3       # 게시일과 관계없이 센다(과제 3A: p15, p16을 더해 12에서 바꿨다)
     assert "p02" in set(pd.read_parquet(out["base"])["posting_id"])          # 마감일이 있어 남는다(과제 3)
 
     w = pd.read_parquet(out["sido_other_words"])
