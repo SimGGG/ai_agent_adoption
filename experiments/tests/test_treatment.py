@@ -38,18 +38,19 @@ def test_skill_code_flags(treat):
     assert ids(treat.has_dev) == ["p01", "p05"]
     assert ids(treat.treat_code) == ["p01", "p02", "p04", "p05"]
     assert ids(treat.treat_all) == ["p01", "p02", "p04", "p05", "p07", "p09"]
-    assert len(treat) == 12
+    assert len(treat) == 14   # 과제 3에서 p13, p14를 더해 12에서 바꿨다
 
 def test_select_arms_use_definition(treat):
     arm = treatment.select_arms(treat.reset_index(), "use")
     arm.index = treat.index
     assert ids(arm == 1) == ["p02", "p04", "p05"]
-    assert ids(arm == 0) == ["p03", "p06", "p08", "p10", "p11", "p12"]
+    assert ids(arm == 0) == ["p03", "p06", "p08", "p10", "p11", "p12", "p13", "p14"]   # p13, p14: 과제 3
     assert ids(arm.isna()) == ["p01", "p07", "p09"]           # 개발 숙련만 있거나 키워드에만 걸린 공고
 
-# 전체 검토 수정에서 더한 시험: 다섯 처치 정의 각각의 처치 공고와 비교 공고(가상 자료 공고 12건)
-_STRICT_COMPARISON = ["p03", "p06", "p08", "p10", "p11", "p12"]
-_BROAD_COMPARISON = ["p03", "p06", "p08", "p10", "p12"]          # p11은 넓은 사전(Claude)에 걸린다
+# 전체 검토 수정에서 더한 시험: 다섯 처치 정의 각각의 처치 공고와 비교 공고(가상 자료 공고 14건,
+# 과제 3에서 비교 공고 p13, p14를 더했다)
+_STRICT_COMPARISON = ["p03", "p06", "p08", "p10", "p11", "p12", "p13", "p14"]
+_BROAD_COMPARISON = ["p03", "p06", "p08", "p10", "p12", "p13", "p14"]   # p11은 넓은 사전(Claude)에 걸린다
 _ARMS = [
     ("kw_strict", "all", ["p01", "p02", "p04", "p05", "p07", "p09"], _STRICT_COMPARISON),
     ("kw_strict", "dev", ["p01", "p05"], _STRICT_COMPARISON),

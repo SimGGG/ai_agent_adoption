@@ -1,6 +1,8 @@
 import pandas as pd, pytest
 from aabundle import classif, ked, rawio, sample
 
+import synth
+
 @pytest.fixture
 def base(synth_data):
     raw = pd.concat(rawio.iter_postings(synth_data["postings_dir"], 2025, sample.RAW_COLUMNS))
@@ -44,11 +46,67 @@ def test_salary_band():
     out = sample.salary_band(s, [30_000_000])
     assert out[0] == "미기재" and out[1] != out[2]
 
+
+def test_posting_date_uses_columns_in_order():
+    raw = pd.DataFrame({"post_start": ["2025-03-02", None, None, "날짜아님"],
+                        "post_end": ["2025-04-01", "2025-05-10", None, "9999-12-31"]})
+    date, source = sample.posting_date(raw, ["post_start", "post_end"])
+    assert date.dt.strftime("%Y-%m-%d").tolist()[:2] == ["2025-03-02", "2025-05-10"]
+    assert date.isna().tolist() == [False, False, True, True]          # 읽을 수 없는 값과 범위 밖의 날짜는 결측
+    assert source.tolist()[:2] == ["post_start", "post_end"]
+    assert source.isna().tolist() == [False, False, True, True]
+
+
+def test_posting_date_accepts_date_objects():
+    import datetime as dt
+    raw = pd.DataFrame({"post_start": [dt.date(2025, 3, 2), None], "post_end": [None, dt.date(9999, 12, 31)]})
+    date, source = sample.posting_date(raw, ["post_start", "post_end"])
+    assert date.isna().tolist() == [False, True] and source.isna().tolist() == [False, True]
+
+
+def test_posting_date_names_missing_columns():
+    raw = pd.DataFrame({"post_start": ["2025-03-02"]})
+    with pytest.raises(KeyError, match="post_end"):
+        sample.posting_date(raw, ["post_start", "post_end"])
+
+
+def test_period_name():
+    groups = [{"name": "초기", "years": [2023, 2024]}, {"name": "1 도입기", "years": [2025]}]
+    out = sample.period_name(pd.Series([2023, 2024, 2025, 2026, pd.NA], dtype="Int64"), groups)
+    assert out.tolist()[:3] == ["초기", "초기", "1 도입기"]
+    assert out.isna().tolist() == [False, False, False, True, True]
+
+
+def test_merge_sido():
+    s = pd.Series(["광주", "전남", "전남광주", "서울", "기타", pd.NA], dtype="string")
+    out = sample.merge_sido(s, {"광주·전남": ["광주", "전남", "전남광주"]})
+    assert out.tolist()[:5] == ["광주·전남", "광주·전남", "광주·전남", "서울", "기타"]
+    assert pd.isna(out.iloc[5])
+
+
+def test_base_uses_post_end_when_post_start_is_missing(base):       # base: 이 파일의 기존 고정물
+    """가상 공고 가운데 게시일이 없고 마감일만 있는 공고는 마감일의 연도·월·기간을 갖고 분석 기간 안에 든다.
+    둘 다 없는 공고는 연도가 결측이고 분석 기간 밖이다."""
+    by_id = base   # 이 파일의 base 고정물은 이미 posting_id를 번호표로 쓴다
+    assert by_id.loc[synth.ID_END_ONLY, "date_source"] == "post_end"
+    assert by_id.loc[synth.ID_END_ONLY, "in_period"] and by_id.loc[synth.ID_END_ONLY, "period"] == synth.PERIOD_NAME
+    assert pd.isna(by_id.loc[synth.ID_NO_DATE, "date_source"]) and pd.isna(by_id.loc[synth.ID_NO_DATE, "year"])
+    assert not by_id.loc[synth.ID_NO_DATE, "in_period"]
+    assert base.loc[base["in_period"], "period"].notna().all()
+
+
+def test_base_merges_sido_and_blanks_ksic_not_in_table(base):
+    assert not base["sido"].isin(["광주", "전남", "전남광주"]).any()
+    assert (base["sido"] == "광주·전남").any()          # 가상 공고의 근무지에 광주와 전남광주가 있다
+    assert not (base["ksic_sub"] == classif.KSIC_NOT_IN_TABLE).any()
+    # 분류표에 없는 코드는 5자리 코드는 남고 소분류만 결측이다(보고서가 건수를 셀 수 있게)
+    assert (base["ksic5"].notna() & base["ksic_sub"].isna()).any()
+
 def test_base_keeps_every_row_and_flags(base):
-    assert len(base) == 12
+    assert len(base) == 14                               # 과제 3에서 p13, p14를 더해 12에서 바꿨다
     assert sorted(base.index[~base.in_occ]) == ["p07", "p08"]
     assert sorted(base.index[~base.has_bzno]) == ["p04"]
-    assert base.in_period.all()
+    assert sorted(base.index[~base.in_period]) == [synth.ID_NO_DATE]   # 과제 3: 게시일과 마감일이 모두 없는 공고
     assert base.loc["p05", "quarter"] == "2025Q3" and base.loc["p01", "keco2"] == "13"
 
 def test_ked_join(base):
@@ -63,22 +121,24 @@ def test_exclusions_in_order(base, synth_data):
     has_skill = pd.Series(True, index=base.index)
     has_skill[["p06", "p10"]] = False
     kept, counts = sample.apply_exclusions(base.reset_index(), synth_data["cfg"], has_skill.reset_index(drop=True))
-    assert sorted(kept.posting_id) == ["p01", "p02", "p03", "p05", "p09", "p11", "p12"]
-    c = counts.set_index("step")
+    assert sorted(kept.posting_id) == ["p01", "p02", "p03", "p05", "p09", "p11", "p12", "p13"]
+    # 과제 3: 연도가 결측인 공고(p14)가 생겨 건수 표에 연도가 결측인 행이 있으므로 단계별로 더해 본다
+    c = counts.groupby("step")[["n_dropped", "n_after"]].sum()
+    assert c.loc["in_period", "n_dropped"] == 1
     assert c.loc["in_occ", "n_dropped"] == 2 and c.loc["has_bzno", "n_dropped"] == 1 and c.loc["has_skill", "n_dropped"] == 2
-    assert c.loc["has_skill", "n_after"] == 7
+    assert c.loc["has_skill", "n_after"] == 8
 
 def test_period_filter(synth_data):
     cfg = synth_data["cfg"]
-    cfg["period"] = {"start": "2025-07-01", "end": "2025-12-31", "unit": "quarter"}
+    cfg["period"].update({"start": "2025-07-01", "end": "2025-12-31"})
     raw = pd.concat(rawio.iter_postings(synth_data["postings_dir"], 2025, sample.RAW_COLUMNS))
     b = sample.build_posting_base(raw, ked.extract_ked_firm(synth_data["ked_firm"]), set(), cfg)
-    assert (~b.in_period).sum() == 4                     # p01~p04
+    assert (~b.in_period).sum() == 5                     # p01~p04와 날짜가 없는 p14(과제 3에서 4에서 바꿨다)
 
 def test_period_compares_dates_not_times(synth_data):
     # 전체 검토 수정에서 더한 시험. 게시일에 시각이 있어도 날짜로 분석 기간을 판단한다.
     cfg = synth_data["cfg"]
-    cfg["period"] = {"start": "2025-07-01", "end": "2025-12-31", "unit": "quarter"}
+    cfg["period"].update({"start": "2025-07-01", "end": "2025-12-31"})
     raw = pd.concat(rawio.iter_postings(synth_data["postings_dir"], 2025, sample.RAW_COLUMNS)).reset_index(drop=True)
     raw = raw.iloc[:4].copy()
     raw["post_start"] = pd.to_datetime(["2025-12-31 23:59:00", "2025-07-01 00:00:00", "2025-06-30 23:59:59",
@@ -92,7 +152,7 @@ def test_apply_exclusions_keeps_input_index_labels(base, synth_data):
     b.index = b.index * 10 + 3
     kept, _ = sample.apply_exclusions(b, synth_data["cfg"])
     assert kept.index.tolist() == b.index[b["in_period"] & b["in_occ"] & b["has_bzno"]].tolist()
-    assert kept.index.tolist() == [3, 13, 23, 43, 53, 83, 93, 103, 113]
+    assert kept.index.tolist() == [3, 13, 23, 43, 53, 83, 93, 103, 113, 123]   # 123: 과제 3에서 더한 p13
 
 def test_missing_bzno_never_joins(synth_data):
     raw = pd.concat(rawio.iter_postings(synth_data["postings_dir"], 2025, sample.RAW_COLUMNS))
@@ -101,7 +161,7 @@ def test_missing_bzno_never_joins(synth_data):
                         "ked_size": pd.array(["BAD"], dtype="string"), "ked_ipo": pd.array(["Y"], dtype="string"),
                         "ked_venture": pd.array(["Y"], dtype="string")})
     b = sample.build_posting_base(raw, pd.concat([k, bad], ignore_index=True), set(), synth_data["cfg"]).set_index("posting_id")
-    assert len(b) == 12
+    assert len(b) == 14                                  # 과제 3에서 p13, p14를 더해 12에서 바꿨다
     assert not b.loc["p04", "ked_matched"]
     assert pd.isna(b.loc["p04", "ked_size"]) and pd.isna(b.loc["p04", "firm_age"])
     assert b.loc["p01", "ked_matched"] and b.loc["p01", "firm_age"] == 15

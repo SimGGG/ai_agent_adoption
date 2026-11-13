@@ -58,8 +58,8 @@ _BOOL = pa.bool_()
 
 # 공고 기본 자료에서 새로 만든 열의 형식. 나머지 열은 원자료 열을 그대로 옮긴 것이라 원자료 파일의 형식을 따른다.
 _BASE_DERIVED_TYPES = {
-    "year": _INT, "month": _INT, "quarter": _STR, "bzno": _STR, "ksic5": _STR, "ksic_sub": _STR,
-    "firm_emp_log": pa.float64(), "keco4": _STR, "keco2": _STR, "salary_band": _STR, "sido": _STR,
+    "year": _INT, "month": _INT, "quarter": _STR, "period": _STR, "date_source": _STR, "bzno": _STR,
+    "ksic5": _STR, "ksic_sub": _STR, "firm_emp_log": pa.float64(), "keco4": _STR, "keco2": _STR, "salary_band": _STR, "sido": _STR,
     "ked_matched": _BOOL, "firm_age": _INT, "ked_size": _STR, "ked_ipo": _STR, "ked_venture": _STR,
     "in_period": _BOOL, "in_occ": _BOOL, "has_bzno": _BOOL, "n_skills": _INT,
 }

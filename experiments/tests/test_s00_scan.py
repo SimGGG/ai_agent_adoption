@@ -13,17 +13,18 @@ def test_scan_outputs(synth_data, tmp_path):
     long = pd.read_parquet(out["skills_long"]); occ = pd.read_parquet(out["occ_year_all"])
     stats = pd.read_parquet(out["scan_stats"]).set_index("year")
 
-    assert sorted(base.posting_id) == [f"p{i:02d}" for i in (1, 2, 3, 4, 5, 6, 9, 10, 11, 12)]
+    # 13: 과제 3에서 더한 마감일만 있는 공고. 날짜가 없는 p14는 분석 기간 단계에서 빠진다
+    assert sorted(base.posting_id) == [f"p{i:02d}" for i in (1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13)]
     assert sorted(treat.posting_id) == sorted(base.posting_id)
     assert set(long.posting_id) <= set(base.posting_id)
     assert base.set_index("posting_id").loc["p12", "n_skills"] == 2
     assert base.set_index("posting_id").loc["p10", "n_skills"] == 0
 
     o = occ.set_index("keco4")
-    assert o.loc["0262", "n"] == 5 and o.loc["0262", "n_use"] == 2       # p02, p04
+    assert o.loc["0262", "n"] == 6 and o.loc["0262", "n_use"] == 2       # p02, p04 (n: 과제 3에서 p14를 더해 5에서 바꿨다)
     assert o.loc["1332", "n_use"] == 1 and o.loc["1332", "n_dev"] == 2   # p05 / p01, p05
     assert o.loc["9052", "n"] == 1 and o.loc["NA", "n"] == 1
-    assert stats.loc[2025, "n_raw"] == 12 and stats.loc[2025, "n_in_occ"] == 10
+    assert stats.loc[2025, "n_raw"] == 14 and stats.loc[2025, "n_in_occ"] == 11   # 과제 3: p13, p14를 더해 12, 10에서 바꿨다
     assert stats.loc[2025, "n_unmatched"] == 1
 
     kw = pd.read_parquet(out["kw_pattern_hits"]).set_index("pattern")
@@ -36,6 +37,8 @@ def test_scan_outputs(synth_data, tmp_path):
 # 시험 안에서만 아래 공고의 게시일과 근무지를 바꿔 쓴다. p02(분석 대상 직종, 생성형 AI 활용 숙련, 잡사이트B)와
 # p07(분석 대상 직종 아님, 잡사이트A)은 게시일이 없다. p05, p09, p11, p12는 base에 남고 근무지가 `기타`이다.
 # p07의 근무지도 `광산구`이지만 base에 없으므로 세지 않는다.
+# 과제 3에서 가상 자료에 게시일이 없는 공고 p13(마감일 있음, 잡사이트A), p14(날짜 없음, 잡사이트B)가 더해졌고,
+# 게시일이 없으면 마감일을 쓰므로(결정 25) 마감일이 있는 p02는 base에 남는다.
 MISSING_POST_START = {"p02": None, "p07": None}
 OTHER_REGIONS = {"p05": "광산구 어딘가", "p09": "광산구", "p11": "아시아·중동", "p12": "가" * 25, "p07": "광산구"}
 
@@ -59,12 +62,12 @@ def test_scan_counts_postings_without_post_start_and_other_region_words(synth_da
     assert list(m.columns) == ["year", "source", "n_raw", "n_no_post_start", "n_in_occ", "n_in_occ_no_post_start",
                                "n_in_occ_use", "n_in_occ_use_no_post_start"]
     assert (m.groupby("year")["n_raw"].sum() == stats["n_raw"]).all()
-    assert m["n_no_post_start"].sum() == len(MISSING_POST_START)
+    assert m["n_no_post_start"].sum() == len(MISSING_POST_START) + 2          # + p13, p14
     s = m.set_index("source")
-    assert s.loc["잡사이트B"].drop("year").tolist() == [4, 1, 3, 1, 2, 1]   # p02, p05, p08, p11
-    assert s.loc["잡사이트A"].drop("year").tolist() == [4, 1, 3, 0, 1, 0]   # p01, p04, p07, p10
-    assert m["n_in_occ"].sum() == 10 and m["n_in_occ_use"].sum() == 3       # 게시일과 관계없이 센다
-    assert "p02" not in set(pd.read_parquet(out["base"])["posting_id"])
+    assert s.loc["잡사이트B"].drop("year").tolist() == [5, 2, 4, 2, 2, 1]   # p02, p05, p08, p11, p14
+    assert s.loc["잡사이트A"].drop("year").tolist() == [5, 2, 4, 1, 1, 0]   # p01, p04, p07, p10, p13
+    assert m["n_in_occ"].sum() == 12 and m["n_in_occ_use"].sum() == 3       # 게시일과 관계없이 센다
+    assert "p02" in set(pd.read_parquet(out["base"])["posting_id"])          # 마감일이 있어 남는다(과제 3)
 
     w = pd.read_parquet(out["sido_other_words"])
     assert list(w.columns) == ["word", "n"]

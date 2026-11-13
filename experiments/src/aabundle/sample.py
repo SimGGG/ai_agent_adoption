@@ -4,7 +4,7 @@ import pandas as pd
 
 from aabundle import classif
 
-RAW_COLUMNS = ["posting_id", "source", "post_start", "bzno", "ksic10", "firm_emp", "keco_2025",
+RAW_COLUMNS = ["posting_id", "source", "post_start", "post_end", "bzno", "ksic10", "firm_emp", "keco_2025",
                "salary_annual_min", "emp_type", "edu_level", "career_type", "career_years_min",
                "region", "dup_count", "ai_peripheral"]
 
@@ -12,8 +12,8 @@ EXCLUSION_STEPS = ("in_period", "in_occ", "has_bzno", "has_skill")
 
 _KED_COLUMNS = ["ked_estab_year", "ked_size", "ked_ipo", "ked_venture"]
 
-BASE_COLUMNS = ["posting_id", "source", "year", "month", "quarter", "bzno", "ksic5", "ksic_sub",
-                "firm_emp_log", "keco4", "keco2", "career_type", "career_years_min", "edu_level",
+BASE_COLUMNS = ["posting_id", "source", "year", "month", "quarter", "period", "date_source", "bzno", "ksic5",
+                "ksic_sub", "firm_emp_log", "keco4", "keco2", "career_type", "career_years_min", "edu_level",
                 "salary_annual_min", "salary_band", "emp_type", "sido", "dup_count", "ai_peripheral",
                 "ked_matched", "firm_age", "ked_size", "ked_ipo", "ked_venture",
                 "in_period", "in_occ", "has_bzno"]
@@ -37,7 +37,8 @@ def _build_sido_table() -> dict:
 
 
 _SIDO = _build_sido_table()
-# 전남과 광주를 합친 통합특별시. 광주, 전남과 합칠지 저자가 정할 수 있도록 따로 둔다(설계 문서 6.7절 16번).
+# 전남과 광주를 합친 통합특별시. `to_sido`는 `전남광주`로 돌려주고, 광주, 전남과 한 범주로 합치는 일은
+# 설정 `region.merge_sido`에 따라 `merge_sido`가 한다(설계 문서 결정 29).
 _SIDO.update({"전남광주": "전남광주", "전남광주통합특별시": "전남광주"})
 
 SIDO_OTHER = "기타"
@@ -69,6 +70,44 @@ def to_sido(region: pd.Series) -> pd.Series:
     return out.fillna(SIDO_OTHER).where(r.notna(), pd.NA)
 
 
+def merge_sido(sido: pd.Series, merge: dict[str, list[str]]) -> pd.Series:
+    """시도 이름을 묶음 이름으로 바꾼다. `merge`는 {묶음 이름: [시도 이름, ...]}이다.
+
+    묶음에 들지 않는 시도 이름과 결측은 그대로 둔다.
+    """
+    s = sido.astype("string")
+    to_group = {member: name for name, members in merge.items() for member in members}
+    return s.map(to_group).astype("string").fillna(s)
+
+
+def posting_date(raw: pd.DataFrame, columns: list[str]) -> tuple[pd.Series, pd.Series]:
+    """공고마다 게시일로 쓸 날짜와 그 날짜를 가져온 열 이름을 돌려준다(설계 문서 결정 25).
+
+    `columns`의 순서대로 처음으로 날짜가 있는 열의 날짜를 쓴다. 시각은 버리고 날짜만 남긴다.
+    읽을 수 없는 값과 `datetime64[ns]`로 나타낼 수 없는 날짜(1677~2262년 밖, 예: 9999-12-31)는 날짜가
+    없는 것으로 본다. 어느 열에도 날짜가 없으면 날짜와 열 이름 모두 결측이다.
+    문자열은 ISO 8601 형식(예: 2025-03-02, 2025-03-02 13:00:00)으로 읽는다.
+    """
+    absent = [c for c in columns if c not in raw.columns]
+    if absent:
+        raise KeyError(f"게시일을 정할 열이 공고 자료에 없습니다: {', '.join(absent)}")
+    date = pd.Series(pd.NaT, index=raw.index, dtype="datetime64[ns]")
+    source = pd.Series(pd.NA, index=raw.index, dtype="string")
+    for c in columns:
+        d = pd.to_datetime(raw[c], errors="coerce", format="ISO8601")
+        d = d.where((d >= pd.Timestamp.min) & (d <= pd.Timestamp.max)).astype("datetime64[ns]").dt.normalize()
+        take = date.isna() & d.notna()
+        date = date.where(~take, d)
+        source = source.where(~take, c)
+    return date, source
+
+
+def period_name(year: pd.Series, groups: list[dict]) -> pd.Series:
+    """연도마다 그 연도가 드는 기간의 이름을 돌려준다(설계 문서 결정 24). 어느 기간에도 들지 않으면 결측."""
+    to_name = {int(y): g["name"] for g in groups for y in g["years"]}
+    return year.astype("Int64").map(to_name).astype("string")
+
+
 def _fmt_edge(e: float) -> str:
     return str(int(e)) if float(e).is_integer() else str(e)
 
@@ -93,14 +132,14 @@ def build_posting_base(raw: pd.DataFrame, ked_firm: pd.DataFrame, ksic_valid: se
     raw = raw.reset_index(drop=True)
     n = len(raw)
 
-    dts = pd.to_datetime(raw["post_start"])
-    year = dts.dt.year.astype("Int64")
-    month = dts.dt.month.astype("Int64")
-    quarter = year.astype("string") + "Q" + dts.dt.quarter.astype("Int64").astype("string")
+    # 게시일은 설정 `period.date_columns`의 순서대로 정한다(`post_start`, 없으면 `post_end`).
+    # 시각을 버린 날짜로 비교하므로, 끝 날의 자정 뒤에 게시된 공고도 분석 기간 안이다.
+    days, date_source = posting_date(raw, cfg["period"]["date_columns"])
+    year = days.dt.year.astype("Int64")
+    month = days.dt.month.astype("Int64")
+    quarter = year.astype("string") + "Q" + days.dt.quarter.astype("Int64").astype("string")
     start = pd.Timestamp(cfg["period"]["start"])
     end = pd.Timestamp(cfg["period"]["end"])
-    # 게시일에 시각이 있어도 날짜로 비교한다. 끝 날의 자정 뒤에 게시된 공고도 분석 기간 안이다.
-    days = dts.dt.normalize()
     in_period = ((days >= start) & (days <= end)).to_numpy(dtype=bool)
 
     bzno = raw["bzno"].astype("string")
@@ -123,9 +162,11 @@ def build_posting_base(raw: pd.DataFrame, ked_firm: pd.DataFrame, ksic_valid: se
         "year": year,
         "month": month,
         "quarter": quarter,
+        "period": period_name(year, cfg["period"]["groups"]),
+        "date_source": date_source,
         "bzno": bzno,
         "ksic5": classif.normalize_ksic(raw["ksic10"]),
-        "ksic_sub": classif.ksic_sub(raw["ksic10"], ksic_valid),
+        "ksic_sub": classif.ksic_sub(raw["ksic10"], ksic_valid, cfg["industry"]["not_in_table"]),
         "firm_emp_log": np.log1p(pd.to_numeric(raw["firm_emp"]).astype("float64")),
         "keco4": keco4,
         "keco2": classif.keco_mid(keco4),
@@ -135,7 +176,7 @@ def build_posting_base(raw: pd.DataFrame, ked_firm: pd.DataFrame, ksic_valid: se
         "salary_annual_min": raw["salary_annual_min"],
         "salary_band": salary_band(raw["salary_annual_min"], cfg["salary_band_edges"]),
         "emp_type": raw["emp_type"],
-        "sido": to_sido(raw["region"]),
+        "sido": merge_sido(to_sido(raw["region"]), cfg["region"]["merge_sido"]),
         "dup_count": raw["dup_count"],
         "ai_peripheral": raw["ai_peripheral"],
         "ked_matched": ked_matched,
@@ -154,7 +195,7 @@ def apply_exclusions(base: pd.DataFrame, cfg: dict, has_skill: pd.Series | None 
     """정해진 순서로 공고를 빼고, 남은 공고와 연도·단계별 건수 표를 돌려준다.
 
     건수는 앞 단계를 통과한 공고만 대상으로 센다. 건너뛴 단계는 표에 행이 없다.
-    `post_start`가 결측인 공고는 `year`가 결측이며, 건수 표에도 `year`가 결측인 행으로 나온다.
+    게시일을 정할 수 없는 공고는 `year`가 결측이며, 건수 표에도 `year`가 결측인 행으로 나온다.
     `has_skill`은 `base`와 위치로 맞춘다(길이가 같아야 한다).
     """
     if has_skill is not None and len(has_skill) != len(base):

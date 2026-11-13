@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 from aabundle import classif
 
 
@@ -13,6 +14,14 @@ def test_ksic_sub_marks_codes_missing_from_table():
     out = classif.ksic_sub(pd.Series(["62010", "Q86201", "99999", None]), {"620", "862"})
     assert out.tolist()[:3] == ["620", "862", classif.KSIC_NOT_IN_TABLE]
     assert pd.isna(out[3])
+
+
+def test_ksic_sub_not_in_table_as_missing():
+    s = pd.Series(["62010", "41999", None])
+    assert classif.ksic_sub(s, {"620"}, not_in_table="missing").isna().tolist() == [False, True, True]
+    assert classif.ksic_sub(s, {"620"}).tolist()[1] == classif.KSIC_NOT_IN_TABLE
+    with pytest.raises(ValueError, match="not_in_table"):
+        classif.ksic_sub(s, {"620"}, not_in_table="drop")
 
 
 def test_keco_mid():

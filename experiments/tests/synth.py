@@ -1,4 +1,9 @@
-"""시험용 가상 자료. 뒤 과제의 시험이 아래 공고 12건의 내용에 기대므로 값을 바꾸지 않는다.
+"""시험용 가상 자료. 뒤 과제의 시험이 아래 공고 14건의 내용에 기대므로 값을 바꾸지 않는다.
+
+p13, p14는 게시일 규칙(설계 문서 결정 25)을 시험하려고 나중에 더한 공고이다. p13은 게시일이 없고
+마감일만 있으며, p14는 둘 다 없다. 둘 다 분석 대상 세분류이고 사업자번호와 숙련이 있다.
+같은 때 산업코드와 근무지 순환 목록에 값을 더해(분류표에 없는 산업코드, 광주와 전남광주 근무지),
+p06 이후 공고의 산업코드와 p05 이후 공고의 근무지가 바뀌었다.
 
 여기서 나온 수치는 연구 결과가 아니다.
 """
@@ -40,10 +45,24 @@ _POSTINGS = [
     # 코드는 둘, 숙련명은 하나: 개수가 맞지 않는 공고
     ("p12", "1332", "1000000006", dt.date(2025, 11, 2), "일반",
      {"occupation": [("IT-01-0001", "숙련A"), ("SM-01-0001", None)]}),
+    # 게시일이 없고 마감일만 있는 공고
+    ("p13", "1332", "1000000001", None, "일반",
+     {"occupation": [("IT-01-0001", "숙련A")]}),
+    # 게시일과 마감일이 모두 없는 공고
+    ("p14", "0262", "1000000002", None, "일반",
+     {"occupation": [("SM-01-0001", "숙련B")]}),
 ]
 
-_KSIC_CYCLE = ["62010", "Q86201", "1220", "C30", None]
-_REGIONS = ["서울 마포구", "경기도 성남시", "부산전체", None]
+ID_END_ONLY = "p13"
+ID_NO_DATE = "p14"
+# 마감일은 게시일 30일 뒤로 준다. 게시일이 없는 공고의 마감일은 아래 표에서 정한다(없으면 결측).
+_POST_END_DAYS = 30
+_POST_END_WITHOUT_START = {ID_END_ONLY: dt.date(2025, 12, 20)}
+# 가상 공고의 연도(2025)가 드는 기간의 이름. write_all이 설정의 period.groups에 넣는다.
+PERIOD_NAME = "가상 기간"
+
+_KSIC_CYCLE = ["62010", "Q86201", "1220", "C30", None, "47121"]   # 47121: 가상 소분류표에 없는 소분류(471)
+_REGIONS = ["서울 마포구", "경기도 성남시", "부산전체", None, "광주 북구", "전남광주통합특별시 광산구"]
 _SALARIES = [30_000_000.0, None, 45_000_000.0, 60_000_000.0]
 _FIRM_EMP = [10, 250, None, 1200]
 _EMP_TYPES = ["regular", "fixed_term", "part_time"]
@@ -52,14 +71,21 @@ _CAREER = ["IRRELEVANT", "ENTRY", "EXPERIENCED_SPECIFIED"]
 _SOURCES = ["잡사이트A", "잡사이트B", "잡사이트C"]
 
 
+def _post_end(p) -> dt.date | None:
+    if p[3] is None:
+        return _POST_END_WITHOUT_START.get(p[0])
+    return p[3] + dt.timedelta(days=_POST_END_DAYS)
+
+
 def _postings_table() -> pa.Table:
     n = len(_POSTINGS)
     cols = {
         "posting_id": [p[0] for p in _POSTINGS],
         "source": [_SOURCES[i % 3] for i in range(n)],
         "post_start": [p[3] for p in _POSTINGS],
+        "post_end": [_post_end(p) for p in _POSTINGS],
         "bzno": [p[2] for p in _POSTINGS],
-        "ksic10": [_KSIC_CYCLE[i % 5] for i in range(n)],
+        "ksic10": [_KSIC_CYCLE[i % len(_KSIC_CYCLE)] for i in range(n)],
         "firm_emp": [_FIRM_EMP[i % 4] for i in range(n)],
         "keco_2025": [p[1] for p in _POSTINGS],
         "salary_annual_min": [_SALARIES[i % 4] for i in range(n)],
@@ -67,13 +93,13 @@ def _postings_table() -> pa.Table:
         "edu_level": [_EDU[i % 4] for i in range(n)],
         "career_type": [_CAREER[i % 3] for i in range(n)],
         "career_years_min": [float(i % 4) for i in range(n)],
-        "region": [_REGIONS[i % 4] for i in range(n)],
+        "region": [_REGIONS[i % len(_REGIONS)] for i in range(n)],
         "dup_count": [1 + i % 3 for i in range(n)],
         "ai_peripheral": [i % 5 == 0 for i in range(n)],
         "detail": [p[4] for p in _POSTINGS],
     }
     types = {
-        "posting_id": pa.string(), "source": pa.string(), "post_start": pa.date32(),
+        "posting_id": pa.string(), "source": pa.string(), "post_start": pa.date32(), "post_end": pa.date32(),
         "bzno": pa.string(), "ksic10": pa.string(), "firm_emp": pa.int64(),
         "keco_2025": pa.string(), "salary_annual_min": pa.float64(), "emp_type": pa.string(),
         "edu_level": pa.string(), "career_type": pa.string(), "career_years_min": pa.float64(),
@@ -230,9 +256,9 @@ def write_all(root: Path) -> dict:
     cfg["data"]["ked_firm"] = "data/ked/KED5002.txt"
     cfg["occupations"]["keco4"] = ["1332", "0262"]
     cfg["occupations"]["exclude_keco2"] = ["01", "61"]
-    # 가상 공고의 게시일은 모두 2025년이다
+    # 가상 공고의 게시일(게시일이 없으면 마감일)은 모두 2025년이다
     cfg["period"]["start"], cfg["period"]["end"] = "2025-01-01", "2025-12-31"
-    cfg["period"]["groups"] = [{"name": "가상 기간", "years": [2025]}]
+    cfg["period"]["groups"] = [{"name": PERIOD_NAME, "years": [2025]}]
     cfg["treatment"]["agent_skills"]["move_to_dev"] = ["IT-05-0413"]
     return {
         "root": root,
