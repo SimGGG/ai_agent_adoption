@@ -23,6 +23,7 @@
 │   ├── CLAUDE.md
 │   ├── config.yaml           # 확정 사항을 담은 설정
 │   ├── paths.py              # 자료와 산출 경로
+│   ├── crosswalks/           # 판단으로 만든 분류 연계표
 │   ├── src/aabundle/         # 공용 모듈
 │   ├── scripts/              # 단계별 실행 스크립트
 │   ├── notebooks/            # 결과 열람용
@@ -102,7 +103,7 @@ PYTHONNOUSERSITE=1 PYTHONUTF8=1 "$(conda info --base)/envs/aabundle/python.exe" 
 ```
 
 - `scan`: 연도별 공고 파일 여섯 개, 숙련 설명 파일, 산업 분류표(`KSIC10.xlsx`), KED 기업 자료를 한 번 읽어 중간 자료 아홉 파일(`base`, `treat`, `skills_long`, `occ_year_all`, `scan_stats`, `kw_pattern_hits`, `post_start_missing`, `sido_other_words`, `post_end_gap`, 모두 parquet)과 1단계 기록 `scan_meta.json`(실행한 시각, git 커밋, 커밋하지 않은 변경이 있었는지, 아래 표의 `scan`을 다시 해야 하는 설정 항목의 값)을 `experiments/outputs/s0/`에 쓴다.
-- `report`: 중간 자료와 함께 숙련 설명 파일, 직종 분류표(`KECO2025.xlsx`), KED 기업 자료(`ked.extract_ked_firm`으로 줄 수와 기업 수를 센다)를 읽어 집계표(CSV)를 `experiments/outputs/s0/tables/`에 쓰고, 결과모형(공고의 특성으로 그 숙련이 공고에 들어 있을 확률을 예측하는 모형) 한 번의 학습 시간을 잰 뒤 `docs/s0-data-audit.md`를 쓴다. 먼저 `scan_meta.json`의 설정 값과 지금 `config.yaml`을 비교해, 다른 항목이 있으면 그 항목을 모두 적고 멈춘다.
+- `report`: 중간 자료와 함께 숙련 설명 파일, 직종 분류표(`KECO2025.xlsx`), KED 기업 자료(`ked.extract_ked_firm`으로 줄 수와 기업 수를 센다), 산업별 AI 노출 지수의 외부 자료 세 파일(아래 "외부 자료")을 읽어 집계표(CSV)를 `experiments/outputs/s0/tables/`에 쓰고, 결과모형(공고의 특성으로 그 숙련이 공고에 들어 있을 확률을 예측하는 모형) 한 번의 학습 시간을 잰 뒤 `docs/s0-data-audit.md`를 쓴다. 먼저 `scan_meta.json`의 설정 값과 지금 `config.yaml`을 비교해, 다른 항목이 있으면 그 항목을 모두 적고 멈춘다.
 - `all`: `scan` 다음에 `report`를 실행한다.
 
 두 명령 모두 일을 시작하기 전에 `config.yaml`의 값이 쓸 수 있는 형태인지 확인한다(`aabundle/validate.py`). 예를 들어 `occupations.keco4`의 코드를 따옴표 없이 적으면 멈춘다.
@@ -112,11 +113,37 @@ PYTHONNOUSERSITE=1 PYTHONUTF8=1 "$(conda info --base)/envs/aabundle/python.exe" 
 | 다시 실행할 명령 | 설정 항목 |
 |---|---|
 | `scan`부터(`all`) | `data.years`, `data.codebook`, `data.ksic`, `data.ked_firm`, `period.start`, `period.end`, `period.date_columns`, `period.groups`, `occupations.keco4`, `industry.not_in_table`, `region.merge_sido`, `treatment.text_columns`, `treatment.keywords`, `treatment.agent_skills`, `salary_band_edges` |
-| `report`만 | `data.keco`, `period.unit`, `occupations.min_use_postings`, `sample.require_bzno`, `treatment.definition`, `treatment.keyword_dictionary`, `skills`, `estimation` |
+| `report`만 | `data.keco`, `data.aiie`, `data.naics_isic`, `data.ksic_isic`, `period.unit`, `occupations.min_use_postings`, `sample.require_bzno`, `treatment.definition`, `treatment.keyword_dictionary`, `skills`, `estimation` |
 
 나머지 항목(`occ_group` 등)은 자료 점검에서 쓰지 않는다.
 
 2026-11-12에 실제 자료로 `all`을 실행한 시간은 약 92분이었다(`scan` 약 88분, `report` 약 4분). `scan`에서 연도별 공고 파일을 읽는 데 걸린 시간은 2021년 818초, 2022년 1,041초, 2023년 866초, 2024년 897초, 2025년 787초, 2026년 705초이다. 집계표만 다시 만들 때는 `report`만 실행한다(중간 자료가 있어야 한다).
+
+## 외부 자료
+
+산업별 AI 노출 정도(교란변수, 즉 처치 여부와 결과 양쪽에 영향을 주어 통제하지 않으면 처치의 효과로 잘못 읽히는 변수)는 Felten, Raj, Seamans의 산업별 AI 노출 지수(AIIE) 가운데 언어 모형 판을 쓴다(`docs/decisions.md` 결정 30). 공개 자료 두 파일은 사람이 직접 내려받아 `data/external/` 아래에 둔다. `data/`는 git에서 빠지므로 커밋되지 않는다. 코드는 이 폴더에 쓰지 않는다.
+
+| 파일 | 출처 | 두는 위치(설정 항목) | 받은 날 |
+|---|---|---|---|
+| `Language Modeling AIOE and AIIE.xlsx` (시트 `LM AIIE`, 미국 산업분류(NAICS) 산업 250개) | https://github.com/AIOE-Data/AIOE | `data/external/aioe/` (`data.aiie`) | 2026-11-13 |
+| `2017_NAICS_to_ISIC_4.xlsx` (미국 통계국의 NAICS 2017 → 국제표준산업분류(ISIC Rev.4) 연계표) | https://www.census.gov/naics/concordances/2017_NAICS_to_ISIC_4.xlsx | `data/external/census/` (`data.naics_isic`) | 2026-11-13 |
+
+```bash
+mkdir -p data/external/aioe data/external/census
+curl -sL -o "data/external/aioe/Language Modeling AIOE and AIIE.xlsx" "https://github.com/AIOE-Data/AIOE/raw/main/Language%20Modeling%20AIOE%20and%20AIIE.xlsx"
+curl -sL -o data/external/census/2017_NAICS_to_ISIC_4.xlsx "https://www.census.gov/naics/concordances/2017_NAICS_to_ISIC_4.xlsx"
+```
+
+한국표준산업분류(KSIC) 10차 소분류를 ISIC Rev.4에 잇는 표는 공개된 것이 없어 판단으로 만들었고, git으로 관리한다(`experiments/crosswalks/ksic10_sub_to_isic4.csv`, 설정 항목 `data.ksic_isic`, 2026-11-13). 소분류 232개마다 한 줄이며 열은 `ksic_sub`(소분류 코드), `ksic_name`(소분류 이름), `isic`(대응하는 ISIC Rev.4 코드의 앞자리 2~4자리, 여럿이면 `;`로 이음), `note`(대응이 분명하지 않은 줄의 근거)이다. 소분류의 이름과 내용을 ISIC Rev.4의 분류와 맞대어 정했고, 이을 곳이 미국 연계표에 없는 소분류(`981`, `982`)는 `isic`을 비워 두었다.
+
+소분류별 값은 세 표를 다음 순서로 이어 만든다(`aabundle/confounders.py`).
+
+1. KSIC 소분류 → ISIC Rev.4 코드의 앞자리(판단으로 만든 표). 앞자리로 시작하는 ISIC 4자리 코드를 모두 잇는다.
+2. ISIC Rev.4 4자리 → NAICS 6자리(미국 통계국 연계표).
+3. NAICS 6자리의 앞 4자리 → AIIE. AIIE 파일의 3자리 수준 항목(예: `531000`)은 연계표의 같은 3자리 아래 4자리 산업 모두에, 여러 산업을 묶은 항목(예: `3250A1`)은 설명에 적힌 4자리 산업 모두에 값을 준다.
+4. 소분류에 이어진 서로 다른 NAICS 4자리 산업 가운데 AIIE 값이 있는 산업의 값을 단순 평균한다. 이어진 산업에 값이 하나도 없는 소분류는 값이 없다(결측).
+
+자료 점검 보고서의 13절(`t15_aiie_coverage`)이 이 값이 붙은 공고의 비율과 값의 분포를 보인다. 세 파일 가운데 하나라도 없으면 이 표만 만들지 않고, 보고서의 13절에 없는 파일을 적는다.
 
 ## 실행 순서
 

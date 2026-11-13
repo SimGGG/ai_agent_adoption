@@ -32,7 +32,7 @@ from lightgbm import LGBMClassifier
 from sklearn.model_selection import GroupKFold
 
 import paths
-from aabundle import classif, ked, rawio, sample, skills, treatment, validate
+from aabundle import classif, confounders, ked, rawio, sample, skills, treatment, validate
 
 OUTPUT_NAMES = ("occ_year_all", "base", "treat", "skills_long", "scan_stats", "kw_pattern_hits",
                 "post_start_missing", "sido_other_words", "post_end_gap")
@@ -505,6 +505,12 @@ REPORT_MAX_ROWS = 30
 FIRM_TOP = 10
 # `t16_detail_by_arm`에 싣는 숙련 수의 분위수
 ARM_SKILL_QUANTILES = {"p50": 0.5, "p75": 0.75, "p90": 0.9}
+# `t15_aiie_coverage`에 싣는 AIIE 값의 분위수
+AIIE_QUANTILES = {"p10": 0.1, "p25": 0.25, "p50": 0.5, "p75": 0.75, "p90": 0.9}
+# `t15_aiie_coverage`를 만드는 외부 자료의 설정 항목(`data.` 아래)
+AIIE_DATA_KEYS = ("aiie", "naics_isic", "ksic_isic")
+# 외부 자료가 없어 `t15_aiie_coverage`를 만들지 않았을 때, 빈 표의 attrs에 없는 파일의 목록을 두는 이름
+MISSING_EXTERNAL_ATTR = "missing_external"
 
 KIND_LABELS = {"dev": "개발", "use": "생성형 AI 활용"}
 # `t10b_occ_list_check`의 상태. 마지막 값은 자료 쪽 목록에서 `occupations.exclude_keco2`로 뺀 세분류이다.
@@ -1055,6 +1061,49 @@ def _t14_placebo_candidates(codebook: pd.DataFrame, counts: pd.DataFrame, n_post
     return out.sort_values(["n", "skill_code"], ascending=[False, True], ignore_index=True)
 
 
+def _missing_external(cfg: dict, root: Path) -> list[str]:
+    """`t15_aiie_coverage`에 쓰는 외부 자료 가운데 설정에 항목이 없거나 파일이 없는 것을 보고서에 쓸 글로 돌려준다."""
+    out = []
+    for key in AIIE_DATA_KEYS:
+        rel = cfg["data"].get(key)
+        if rel is None:
+            out.append(f"`data.{key}`(설정에 항목이 없음)")
+        elif not (root / rel).exists():
+            out.append(f"`{rel}`(`data.{key}`)")
+    return out
+
+
+def _t15_aiie_coverage(base: pd.DataFrame, flags: pd.DataFrame, alive: np.ndarray, cfg: dict, root: Path,
+                       ksic_valid: set[str]) -> pd.DataFrame:
+    """제외 규칙 네 단계를 적용한 공고에 산업 소분류별 AIIE가 붙는 비율과 값의 분위수(전체, `has_use` 1과 0).
+
+    외부 자료가 없으면 빈 표를 돌려주고 attrs[MISSING_EXTERNAL_ATTR]에 없는 파일의 목록을 둔다. 값이 붙은 소분류 수와
+    산업분류표의 소분류 수는 attrs의 `n_sub_with_aiie`, `n_sub_total`에 둔다(보고서의 설명에 쓴다).
+    """
+    missing = _missing_external(cfg, root)
+    if missing:
+        out = pd.DataFrame()
+        out.attrs[MISSING_EXTERNAL_ATTR] = missing
+        return out
+    d = cfg["data"]
+    naics_isic = confounders.load_naics_isic(root / d["naics_isic"])
+    aiie = confounders.load_aiie(root / d["aiie"], set(naics_isic["naics6"].str[:4]))
+    table = confounders.aiie_by_ksic_sub(aiie, naics_isic, confounders.load_ksic_isic(root / d["ksic_isic"]))
+    value = confounders.attach_aiie(base["ksic_sub"], table).to_numpy()
+    has_use = flags["has_use"].to_numpy(dtype=bool)
+    rows = []
+    for label, mask in (("전체", alive), ("1", alive & has_use), ("0", alive & ~has_use)):
+        v = pd.Series(value[mask]).dropna()
+        n = int(mask.sum())
+        row = {"has_use": label, "n": n, "n_with_aiie": len(v), "with_aiie_rate": len(v) / n if n else np.nan}
+        row.update({k: float(v.quantile(q)) if len(v) else np.nan for k, q in AIIE_QUANTILES.items()})
+        rows.append(row)
+    out = pd.DataFrame(rows).astype({"n": "int64", "n_with_aiie": "int64"})
+    out.attrs["n_sub_total"] = len(ksic_valid)
+    out.attrs["n_sub_with_aiie"] = len(ksic_valid & set(table["ksic_sub"]))
+    return out
+
+
 def _t16_detail_by_arm(base: pd.DataFrame, outcome: pd.DataFrame, arm: np.ndarray) -> pd.DataFrame:
     """제외 규칙 네 단계를 적용한 공고를 설정의 처치 정의로 나눈 처치 공고와 비교 공고(`_arm`)의 공고 수, AI 에이전트
     숙련코드를 뺀 숙련 수(`outcome`은 AI 에이전트 숙련코드를 뺀 숙련 긴 표)의 평균과 분위수, 본문 글자 수
@@ -1149,6 +1198,9 @@ def build_tables(cfg: dict, root: Path, s0_dir: Path) -> dict[str, pd.DataFrame]
 
     각 표는 `s0_dir/tables/{표 이름}.csv`(utf-8-sig)로도 쓰고, 그 경로를 표의 `attrs["csv_path"]`에 둔다.
     표에는 집계값만 넣는다(공고 번호, 사업자번호, 공고 원문은 넣지 않는다).
+    `t15_aiie_coverage`에 쓰는 외부 자료(`data.aiie`, `data.naics_isic`, `data.ksic_isic`)의 설정 항목이나 파일이
+    없으면 그 표만 만들지 않는다. 그때 그 표 자리에는 attrs[MISSING_EXTERNAL_ATTR]에 없는 파일을 적은 빈 표를 두고
+    CSV는 쓰지 않는다.
     """
     validate.validate_config(cfg)
     root, s0_dir = Path(root), Path(s0_dir)
@@ -1215,6 +1267,7 @@ def build_tables(cfg: dict, root: Path, s0_dir: Path) -> dict[str, pd.DataFrame]
         "t13_adjacent_candidates": _t13_adjacent_candidates(codebook, skill_counts, n_alive, n_use_treated, kept,
                                                             agent_codes, cfg),
         "t14_placebo_candidates": _t14_placebo_candidates(codebook, skill_counts, n_alive, kept, cfg),
+        "t15_aiie_coverage": _t15_aiie_coverage(base, flags, alive, cfg, root, ksic_valid),
         "t16_detail_by_arm": _t16_detail_by_arm(base, outcome, arm),
         "t17_firm_treated": _t17_firm_treated(base, arm),
         "t18_first_treated_firms": _t18_first_treated_firms(base, arm),
@@ -1223,6 +1276,9 @@ def build_tables(cfg: dict, root: Path, s0_dir: Path) -> dict[str, pd.DataFrame]
     table_dir.mkdir(parents=True, exist_ok=True)
     for name, df in tables.items():
         path = table_dir / f"{name}.csv"
+        if MISSING_EXTERNAL_ATTR in df.attrs:   # 만들지 않은 표. 앞선 실행의 CSV가 남아 있으면 지운다
+            path.unlink(missing_ok=True)
+            continue
         df.to_csv(path, index=False, encoding="utf-8-sig")
         df.attrs["csv_path"] = str(path)
     return tables
@@ -1320,7 +1376,7 @@ def time_outcome_model(base: pd.DataFrame, treat: pd.DataFrame, long: pd.DataFra
 # --- 보고서 ----------------------------------------------------------------
 
 # (절 번호, 절 제목, 표 이름). 제목은 설계 문서 6.6절의 항목 내용 그대로이다. 다만 1절 제목에는 표에 있는 분석
-# 기간 단계를 더했다. 13절(산업별 AI 노출 지수)은 아직 없다.
+# 기간 단계를 더했다.
 REPORT_SECTIONS = [
     (1, "제외 규칙 단계별 공고 수 (연도별): 분석 기간, 분석 대상 직종 한정, 사업자번호 없음, 숙련 없음. 게시일이 없는 "
         "공고 가운데 마감일로 게시일을 대신한 공고 수와 둘 다 없는 공고 수, 게시일과 마감일이 모두 있는 공고의 두 날짜 "
@@ -1348,6 +1404,7 @@ REPORT_SECTIONS = [
     (11, "연봉과 근무지", ["t11_salary", "t12_sido_other", "t12b_sido_other_words"]),
     (12, "인접 숙련 후보(6.7절 3번)와 placebo 숙련 후보의 숙련별 공고 수와 출현율",
      ["t13_adjacent_candidates", "t14_placebo_candidates"]),
+    (13, "산업별 AI 노출 지수가 붙은 공고의 비율과 값의 분포", ["t15_aiie_coverage"]),
     (14, "처치 여부별 공고당 숙련 수와 본문 글자 수, 처치 공고가 있는 기업 수와 기업별 집중도, 같은 기업·같은 연도에 "
          "비교 공고도 있는 처치 공고의 수, 처치 공고를 처음 낸 연도별 기업 수와 그 전에 낸 비교 공고 수",
      ["t16_detail_by_arm", "t17_firm_treated", "t18_first_treated_firms"]),
@@ -1362,6 +1419,14 @@ REPORT_SECTION_INTROS = {
          "두되 결과표에 따로 표시한다(`proposal.md` 3.2절). placebo 숙련은 생성형 AI 활용과 관계가 없어야 하는 숙련이며, "
          "같은 방법으로 추정했을 때 이 숙련에서 효과가 0으로 나오는지를 보아 분석 방법에 문제가 없는지 점검하는 데 쓴다"
          "(`proposal.md` 7장 2번). 두 목록은 이 절의 후보 표를 본 뒤 정한다(`docs/decisions.md` 결정 33)."),
+    13: ("교란변수는 처치 여부와 결과 양쪽에 영향을 주어, 통제하지 않으면 처치의 효과로 잘못 읽히는 변수이다. 산업별 AI "
+         "노출 정도를 교란변수로 쓰려고 Felten, Raj, Seamans의 산업별 AI 노출 지수(AIIE) 가운데 언어 모형 판을 쓴다"
+         "(`docs/decisions.md` 결정 30). AIIE는 직업에 필요한 능력이 AI 응용 분야(이 판에서는 언어 모형)와 얼마나 "
+         "관련되는지를 나타내는 직업별 지수를 산업의 직업 구성으로 가중 평균한 값이며, 미국 산업분류(NAICS) 4자리 산업마다 "
+         "있다. 이 값을 한국표준산업분류(KSIC) 소분류로 옮기려고 세 표를 잇는다. KSIC 소분류를 판단으로 만든 표"
+         "(`experiments/crosswalks/ksic10_sub_to_isic4.csv`)로 국제표준산업분류(ISIC Rev.4) 코드의 앞자리에 잇고, "
+         "미국 통계국의 NAICS 2017 → ISIC Rev.4 연계표로 그 ISIC 코드에 이어진 NAICS 6자리 산업을 찾은 뒤, 그 앞 "
+         "4자리 산업 가운데 AIIE 값이 있는 서로 다른 산업의 값을 단순 평균한다(`aabundle/confounders.py`)."),
     14: ("이 절의 처치 공고와 비교 공고는 제외 규칙 네 단계를 모두 적용한 공고를 설정의 처치 정의"
          "(`treatment.definition`)로 나눈 것이다(`treatment.select_arms`)."),
 }
@@ -1552,6 +1617,12 @@ def _table_notes(cfg: dict) -> dict[str, str]:
             "관계가 없어야 하는 숙련이며, 이 숙련에서 효과가 0으로 나오는지를 보아 분석 방법에 문제가 없는지 점검하는 데 "
             "쓴다(`proposal.md` 7장 2번). 이 표에 처치 공고와 비교 공고의 출현율을 싣지 않는 것은, placebo 숙련은 추정 "
             "결과를 보기 전에 골라야 하는데 두 집단의 출현율 차이는 추정 결과와 같은 방향의 정보이기 때문이다."),
+        "t15_aiie_coverage": (
+            "대상: " + _ALIVE_NOTE + ". `has_use` = 전체는 이 공고 모두이고, `1`과 `0`은 그 가운데 생성형 AI 활용 숙련이 "
+            "있는 공고와 없는 공고이다. `n_with_aiie`는 산업 소분류(`ksic_sub`)에 AIIE 값이 붙은 공고 수, "
+            "`with_aiie_rate`는 `n_with_aiie / n`이다. 산업코드가 없거나 소분류표에 없는 공고(`ksic_sub` 결측)와, 소분류에 "
+            "이어진 산업에 AIIE 값이 없는 공고는 값이 붙지 않은 쪽에 센다. `p10`, `p25`, `p50`, `p75`, `p90`은 값이 "
+            "붙은 공고의 AIIE 값의 10, 25, 50, 75, 90% 분위수이다(공고마다 한 번씩 센다)."),
         "t16_detail_by_arm": (
             "대상: " + _ALIVE_NOTE + "를 설정의 처치 정의(" + definition + ")로 나눈 처치 공고와 비교 공고(어느 쪽도 "
             "아닌 공고는 뺐다). " + _POST_YEAR + " 숙련 수는 공고의 숙련 가운데 AI 에이전트 숙련코드를 뺀 숙련의 수이고, "
@@ -1703,6 +1774,14 @@ def _scan_meta_lines(scan_meta: dict | None) -> list[str]:
     ]
 
 
+def _note_from_attrs(df: pd.DataFrame) -> str:
+    """표를 만들 때 정해지는 수를 설명 끝에 붙일 문장으로 돌려준다(지금은 `t15_aiie_coverage`의 소분류 수만)."""
+    if "n_sub_total" not in df.attrs:
+        return ""
+    return (f" 산업분류표(`data.ksic`)의 소분류 {df.attrs['n_sub_total']:,}개 가운데 AIIE 값이 붙은 소분류는 "
+            f"{df.attrs['n_sub_with_aiie']:,}개이다.")
+
+
 def write_report(tables: dict, timing: dict, cfg: dict, report_path: Path, commit: str,
                  scan_meta: dict | None = None) -> Path:
     """집계표와 학습 시간 측정 결과로 자료 점검 보고서(마크다운)를 쓰고 경로를 돌려준다. 숫자만 싣는다.
@@ -1722,9 +1801,9 @@ def write_report(tables: dict, timing: dict, cfg: dict, report_path: Path, commi
         *_scan_meta_lines(scan_meta),
         f"- 분석 기간: {cfg['period']['start']} ~ {cfg['period']['end']} (기간 단위: {unit_text})",
         f"- 분석 대상 세분류 수: {len(cfg['occupations']['keco4'])}",
-        f"- 키워드 사전은 임시값이다(확정 전). 엄격한 사전 {len(k['strict'])}개, 넓은 사전에 더한 표현 "
-        f"{len(k['broad_extra'])}개, 제외 표현 {len(k['exclude'])}개, 생성형 AI 활용 표현 {len(k['use'])}개 "
-        "(`config.yaml`의 `treatment.keywords`).",
+        f"- 키워드 사전은 2026-11-13에 확정했다(`docs/decisions.md` 결정 32, 36). 엄격한 사전 {len(k['strict'])}개, "
+        f"넓은 사전에 더한 표현 {len(k['broad_extra'])}개, 제외 표현 {len(k['exclude'])}개, 생성형 AI 활용 표현 "
+        f"{len(k['use'])}개(`config.yaml`의 `treatment.keywords`).",
         "- 이 보고서는 `experiments/scripts/s00_data_audit.py report`가 만든다. 모든 표의 전체 CSV는 "
         "`experiments/outputs/s0/tables/`에 있다.",
         "",
@@ -1736,7 +1815,12 @@ def write_report(tables: dict, timing: dict, cfg: dict, report_path: Path, commi
         if number == 7:
             lines += _timing_block(timing, cfg)
         for name in names:
-            lines += _table_block(name, tables[name], notes[name])
+            df = tables[name]
+            if MISSING_EXTERNAL_ATTR in df.attrs:
+                lines += [f"외부 자료가 없어 만들지 않았다(`{name}`). 없는 파일: "
+                          + ", ".join(df.attrs[MISSING_EXTERNAL_ATTR]) + ".", ""]
+                continue
+            lines += _table_block(name, df, notes[name] + _note_from_attrs(df))
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     return report_path

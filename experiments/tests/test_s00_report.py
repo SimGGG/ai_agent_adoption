@@ -52,7 +52,9 @@ def test_report_has_all_sections_and_no_text(synth_data, tmp_path):
     p = s00.write_report(t, timing, synth_data["cfg"], tmp_path / "report.md", commit="testcommit")
     text = p.read_text(encoding="utf-8")
     assert all(f"## {i}." in text for i in range(1, 12))
-    assert "testcommit" in text and "임시" in text and "에이전트 개발" not in text
+    # 과제 6: 키워드 사전을 2026-11-13에 확정해(결정 32, 36) 보고서 머리의 `임시값` 문장을 바꿨다
+    assert "testcommit" in text and "키워드 사전은 2026-11-13에 확정했다" in text and "임시" not in text
+    assert "에이전트 개발" not in text
 
 
 # 아래는 과제 9에서 더한 시험이다.
@@ -411,11 +413,15 @@ def test_report_new_sections_and_notes(tables, synth_data, tmp_path):
     cfg = synth_data["cfg"]
     text = s00.write_report(tables, _NO_TIMING, cfg, tmp_path / "report.md", commit="c").read_text(encoding="utf-8")
     assert "28개" not in text and "25개" not in text
+    # 과제 6에서 t15_aiie_coverage를 더했다
     for name in ("t01c_post_end_gap", "t02c_occ_group_treated", "t13_adjacent_candidates", "t14_placebo_candidates",
-                 "t16_detail_by_arm", "t17_firm_treated", "t18_first_treated_firms"):
+                 "t15_aiie_coverage", "t16_detail_by_arm", "t17_firm_treated", "t18_first_treated_firms"):
         assert f"### `{name}`" in text
     assert "## 12. 인접 숙련 후보(6.7절 3번)와 placebo 숙련 후보의 숙련별 공고 수와 출현율" in text
-    assert "## 14. 처치 여부별 공고당 숙련 수와 본문 글자 수" in text and "## 13." not in text
+    # 과제 6: 13절이 생겨 `"## 13." not in text`를 13절의 제목과 위치로 바꿨다
+    assert "## 14. 처치 여부별 공고당 숙련 수와 본문 글자 수" in text
+    assert "## 13. 산업별 AI 노출 지수가 붙은 공고의 비율과 값의 분포" in text
+    assert text.index("## 12. ") < text.index("## 13. ") < text.index("### `t15_aiie_coverage`") < text.index("## 14. ")
     assert "게시일과 마감일이 모두 있는 공고의 두 날짜 간격 분포" in text.split("\n## 2.")[0]
     assert text.index("## 12. ") < text.index("### `t13_adjacent_candidates`") < text.index("### `t14_placebo_candidates`")
     assert text.index("## 14. ") < text.index("### `t16_detail_by_arm`")
@@ -430,3 +436,49 @@ def test_report_new_sections_and_notes(tables, synth_data, tmp_path):
     assert "설정에서 뺀 중분류" in notes["t10b_occ_list_check"] and "data.years" in notes["t10b_occ_list_check"]
     assert "`광주·전남`" in notes["t12_sido_other"]
     assert "post_start`, 없으면 `post_end`" in s00._POST_YEAR
+
+
+# 아래는 과제 6에서 더한 시험이다(산업 소분류별 AI 노출 지수의 결합 비율).
+
+def test_t15_aiie_coverage(tables, synth_scan, synth_data, tmp_path):
+    t = tables["t15_aiie_coverage"]
+    assert list(t.columns) == ["has_use", "n", "n_with_aiie", "with_aiie_rate", "p10", "p25", "p50", "p75", "p90"]
+    assert t["has_use"].tolist() == ["전체", "1", "0"]
+    assert (t["n_with_aiie"] <= t["n"]).all()
+    g = t.set_index("has_use")
+    # 전체 행의 n은 제외 규칙 네 단계를 적용한 공고 수(t03b의 n_postings)와 같다
+    assert g.loc["전체", "n"] == tables["t03b_sparse_filter_grid"]["n_postings"].iloc[0]
+    assert g.loc["1", "n"] + g.loc["0", "n"] == g.loc["전체", "n"]
+    # 산업코드가 없는 가상 공고(p05, p11)는 값이 붙지 않은 쪽에 센다
+    s00 = synth_scan["s00"]
+    base = pd.read_parquet(synth_scan["s0_dir"] / "base.parquet")
+    alive, _ = s00._exclusions(base, synth_scan["cfg"])
+    sub = base["ksic_sub"][alive]
+    assert sub.isna().sum() >= 1
+    assert g.loc["전체", "n_with_aiie"] == sub.isin(synth.SUBS_WITH_AIIE).sum()
+    assert g.loc["전체", "n"] - g.loc["전체", "n_with_aiie"] >= sub.isna().sum()
+    # 값이 붙은 소분류 수와 전체 소분류 수(가상 산업분류표의 620, 862, 012 가운데 620, 862)를 설명에 적는다
+    text = s00.write_report(tables, _NO_TIMING, synth_data["cfg"], tmp_path / "report.md", commit="c").read_text(
+        encoding="utf-8")
+    sec13 = text[text.index("## 13. "):text.index("## 14. ")]
+    assert "소분류 3개 가운데 AIIE 값이 붙은 소분류는 2개" in sec13
+    assert "한국표준산업분류(KSIC)" in sec13 and "국제표준산업분류(ISIC Rev.4)" in sec13 and "미국 산업분류(NAICS)" in sec13
+
+
+@pytest.mark.parametrize("how", ["no_key", "no_file"])
+def test_t15_is_skipped_without_external_files(synth_scan, tmp_path, how):
+    s00, root = synth_scan["s00"], synth_scan["root"]
+    cfg = copy.deepcopy(synth_scan["cfg"])
+    if how == "no_key":
+        del cfg["data"]["aiie"]
+        shown = "`data.aiie`"
+    else:
+        (root / cfg["data"]["naics_isic"]).unlink()
+        shown = cfg["data"]["naics_isic"]
+    t = s00.build_tables(cfg, root, synth_scan["s0_dir"])
+    assert "t16_detail_by_arm" in t and not t["t01_exclusions"].empty      # 다른 표는 그대로 만든다
+    assert not (synth_scan["s0_dir"] / "tables" / "t15_aiie_coverage.csv").exists()
+    text = s00.write_report(t, _NO_TIMING, cfg, tmp_path / "report.md", commit="c").read_text(encoding="utf-8")
+    sec13 = text[text.index("## 13. "):text.index("## 14. ")]
+    assert "외부 자료가 없어 만들지 않았다" in sec13 and shown in sec13
+    assert "### `t15_aiie_coverage`" not in text

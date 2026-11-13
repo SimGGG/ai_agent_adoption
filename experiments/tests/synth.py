@@ -18,6 +18,8 @@ p17은 자료 점검 1단계가 날짜로 쓰지 못하는 마감일을 세는�
 `ADJ_ABSENT`, `PLACEBO_CANDIDATE`)를 더하고, p03에 `ADJ_PRESENT`를, p02에 `PLACEBO_CANDIDATE`를 더했다.
 AI 에이전트 숙련코드 `IT-05-0398`의 세부 분류도 인접 숙련 후보의 이름으로 바꿨다(후보 표에서 빠지는지 보기 위해서다).
 
+과제 6에서 산업별 AI 노출 지수의 가상 외부 자료 세 파일(`write_external`)을 더했다. 공고의 내용은 바꾸지 않았다.
+
 여기서 나온 수치는 연구 결과가 아니다.
 """
 import datetime as dt
@@ -287,6 +289,83 @@ def _write_ked(path: Path) -> None:
     path.write_bytes(b"".join(rows))
 
 
+# 산업 소분류별 AI 노출 지수(과제 6)의 가상 외부 자료. 경로는 설정(`data.aiie`, `data.naics_isic`, `data.ksic_isic`)의
+# 기본값과 같은 자리이다.
+EXTERNAL_PATHS = {
+    "aiie": "data/external/aioe/Language Modeling AIOE and AIIE.xlsx",
+    "naics_isic": "data/external/census/2017_NAICS_to_ISIC_4.xlsx",
+    "ksic_isic": "experiments/crosswalks/ksic10_sub_to_isic4.csv",
+}
+# AIIE 시트의 (코드, 설명, 값). 4자리 항목, 3자리 수준 항목(`531000`), 묶은 항목(`3250A1`)이 모두 있다.
+# 가상 공고의 소분류 620은 5415(1.5)에, 862는 6221(0.5)에 이어지고, 012는 AIIE 값이 없는 1121에만 이어진다.
+_AIIE_ROWS = [
+    ("611100", "Elementary and Secondary Schools", 1.0),
+    ("531000", "Real Estate", 2.0),
+    ("3250A1", "Chemical Manufacturing (3251 and 3259 only)", 3.0),
+    ("531100", "Lessors of Real Estate", 9.0),
+    ("541500", "Computer Systems Design and Related Services", 1.5),
+    ("622100", "General Medical and Surgical Hospitals", 0.5),
+]
+# 미국 통계국 연계표의 머리글(실제 파일과 같다)과 행. NAICS와 ISIC 코드는 실제 파일처럼 숫자로 저장한다.
+_NAICS_ISIC_HEADER = ["Part of NAICS US", "2017\nNAICS\nUS  ", "2017 NAICS US TITLE", "Part of ISIC", "ISIC 4.0",
+                      "ISIC Revision 4.0 Title",
+                      "Notes:  link content based on NAICS definition, entire NAICS industry if blank"]
+_NAICS_ISIC_ROWS = [
+    (None, 0, "Multiple NAICS industries", None, 9810, "Undifferentiated goods-producing activities", "one to many"),
+    (None, 111110, "Soybean Farming", "*", 111, "Growing of cereals", " "),
+    (None, 111332, "Grape Vineyards", "*", 121, "Growing of grapes", " "),
+    (None, 112111, "Beef Cattle Ranching and Farming", None, 141, "Raising of cattle and buffaloes", " "),
+    (None, 325110, "Petrochemical Manufacturing", "*", 2011, "Manufacture of basic chemicals", " "),
+    (None, 531110, "Lessors of Residential Buildings", "*", 6810, "Real estate activities", " "),
+    (None, 541511, "Custom Computer Programming Services", None, 6201, "Computer programming activities", " "),
+    (None, 541512, "Computer Systems Design Services", "*", 6202, "Computer consultancy", " "),
+    (None, 611110, "Elementary and Secondary Schools", "*", 8510, "Pre-primary and primary education", " "),
+    (None, 622110, "General Medical and Surgical Hospitals", None, 8610, "Hospital activities", " "),
+]
+# 판단으로 만든 KSIC-ISIC 표(가상). 011은 앞자리가 둘이고, 981은 이을 곳이 없다.
+_KSIC_ISIC_CSV = (
+    "ksic_sub,ksic_name,isic,note\n"
+    "011,작물 재배업,011;012,\n"
+    "012,축산업,014,\n"
+    "620,컴퓨터 프로그래밍업,620,\n"
+    "862,병원,861,가상 자료\n"
+    "981,자가 소비를 위한 가사 생산 활동,,이을 곳이 없는 소분류\n"
+)
+# 가상 KSIC-ISIC 표와 가상 AIIE로 값이 붙는 가상 산업분류표의 소분류
+SUBS_WITH_AIIE = {"620", "862"}
+
+
+def write_external(root: Path, aiie_extra: list[tuple[str, str, float]] | None = None) -> dict:
+    """`root` 아래 설정의 기본값과 같은 자리에 가상 외부 자료 세 파일을 쓰고 {이름: 경로}를 돌려준다.
+
+    AIIE 파일에는 실제처럼 `LM AIOE`, `LM AIIE` 두 시트가 있다. `aiie_extra`의 행은 `LM AIIE` 시트 끝에 더한다.
+    """
+    root = Path(root)
+    out = {name: root / rel for name, rel in EXTERNAL_PATHS.items()}
+    for p in out.values():
+        p.parent.mkdir(parents=True, exist_ok=True)
+
+    wb = openpyxl.Workbook()
+    wb.active.title = "LM AIOE"
+    wb["LM AIOE"].append(["SOC Code", "Occupation Title", "Language Modeling AIOE"])
+    ws = wb.create_sheet("LM AIIE")
+    ws.append(["NAICS", "NAICS Description", "Language Modeling AIIE"])
+    for code, desc, value in _AIIE_ROWS + list(aiie_extra or []):
+        ws.append([code, desc, value])
+    wb.save(out["aiie"])
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "NAICS 17 to ISIC 4 technical"
+    ws.append(_NAICS_ISIC_HEADER)
+    for row in _NAICS_ISIC_ROWS:
+        ws.append(list(row))
+    wb.save(out["naics_isic"])
+
+    out["ksic_isic"].write_text(_KSIC_ISIC_CSV, encoding="utf-8")
+    return out
+
+
 def write_all(root: Path) -> dict:
     """`root` 아래에 가상 자료 한 벌을 쓰고 경로와 설정을 담은 사전을 돌려준다.
 
@@ -307,6 +386,7 @@ def write_all(root: Path) -> dict:
     _write_ksic(ksic)
     _write_keco(keco)
     _write_ked(ked_dir / "KED5002.txt")
+    external = write_external(root)
 
     cfg = paths.load_config()
     cfg["data"]["years"] = [2025]
@@ -314,6 +394,8 @@ def write_all(root: Path) -> dict:
     cfg["data"]["ksic"] = "data/postings/KSIC10.xlsx"
     cfg["data"]["keco"] = "data/postings/KECO2025.xlsx"
     cfg["data"]["ked_firm"] = "data/ked/KED5002.txt"
+    for name, rel in EXTERNAL_PATHS.items():
+        cfg["data"][name] = rel
     cfg["occupations"]["keco4"] = list(OCCUPATIONS)
     cfg["occupations"]["exclude_keco2"] = ["01", "61"]
     # 가상 공고의 게시일(게시일이 없으면 마감일)은 모두 2025년이다
@@ -331,5 +413,6 @@ def write_all(root: Path) -> dict:
         "ksic": ksic,
         "keco": keco,
         "ked_firm": ked_dir / "KED5002.txt",
+        **external,
         "cfg": cfg,
     }
