@@ -107,6 +107,18 @@ def test_use_keyword_postings_leave_the_comparison_group():
     assert treatment.select_arms(t, "dev").tolist() == [0, pd.NA, pd.NA, pd.NA]      # 비교 공고는 어떤 정의에서도 같다
 
 
+def test_comparison_group_follows_keyword_col():
+    """넓은 사전에만 걸린 공고는 키워드 열이 `kw_strict`이면 비교 공고이고, `kw_broad`이면 비교 공고가 아니다.
+    과제 3A 검토 수정에서 더한 시험이다. 가상 공고 가운데 넓은 사전에 걸린 공고는 모두 다른 이유로도 비교 공고에서
+    빠지므로, 비교 공고가 `keyword_col`을 따르는지는 여기서 확인한다."""
+    #            strict broad  use   dev   use(code)
+    t = _treat([(0, 1, 0, 0, 0)])     # 넓은 사전에만 걸린 공고
+    assert treatment.select_arms(t, "use").tolist() == [0]
+    assert treatment.select_arms(t, "use", keyword_col="kw_broad").tolist() == [pd.NA]
+    assert treatment.select_arms(t, "keyword", keyword_col="kw_broad").tolist() == [1]
+    assert treatment.select_arms(t, "use_any", keyword_col="kw_broad").tolist() == [pd.NA]
+
+
 def test_select_arms_requires_kw_use():
     t = _treat([(0, 0, 0, 0, 0)]).drop(columns="kw_use")
     with pytest.raises(KeyError, match="kw_use"):
