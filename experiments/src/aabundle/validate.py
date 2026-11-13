@@ -12,6 +12,8 @@ from aabundle import treatment
 # 보고서가 아는 기간 단위(`period.unit`)
 PERIOD_UNITS = ("quarter", "half", "year")
 KEYWORD_DICTIONARIES = ("strict", "broad")
+# 산업코드가 소분류표에 없을 때의 처리(`industry.not_in_table`): 별도 범주로 두거나 결측으로 둔다
+INDUSTRY_NOT_IN_TABLE = ("category", "missing")
 
 _MISSING = object()
 
@@ -89,6 +91,85 @@ def _check_joined(patterns: list[str], key: str, what: str, problems: list[str])
     return True
 
 
+def _is_str_list(v, allow_empty: bool) -> bool:
+    """빈 문자열이 아닌 문자열만 든 목록인지 본다. `allow_empty`가 False이면 하나 이상 들어 있어야 한다."""
+    return (isinstance(v, list) and (allow_empty or bool(v))
+            and all(isinstance(x, str) and x.strip() for x in v))
+
+
+def _check_period_groups(groups, unit, d_start, d_end, problems: list[str]) -> None:
+    """`period.groups`를 확인한다. 분석 기간의 모든 연도가 정확히 한 기간에 들어야 한다."""
+    if not isinstance(groups, list) or not groups:
+        problems.append(f"`period.groups`는 기간이 하나 이상 든 목록이어야 합니다: {groups!r}")
+        return
+    n_before = len(problems)
+    names: list[str] = []
+    year_count: dict[int, int] = {}
+    for i, g in enumerate(groups):
+        name, years = (g.get("name"), g.get("years")) if isinstance(g, dict) else (None, None)
+        if not (isinstance(name, str) and name.strip()):
+            problems.append(f"`period.groups`의 {i + 1}번째 기간에 `name`(빈 문자열이 아닌 문자열)이 없습니다: {g!r}")
+        else:
+            names.append(name)
+        if not (isinstance(years, list) and years and all(_is_int(y) for y in years)):
+            problems.append(f"`period.groups`의 {i + 1}번째 기간의 `years`는 정수 연도가 하나 이상 든 목록이어야 합니다: {g!r}")
+        else:
+            for y in years:
+                year_count[y] = year_count.get(y, 0) + 1
+    dup_names = sorted({n for n in names if names.count(n) > 1})
+    if dup_names:
+        problems.append(f"`period.groups`에 이름이 겹치는 기간이 있습니다: {dup_names}")
+    if len(problems) > n_before:
+        return
+    twice = sorted(y for y, c in year_count.items() if c > 1)
+    if twice:
+        problems.append(f"`period.groups`에서 한 연도가 두 기간 이상에 듭니다: {twice}")
+    if d_start is not None and d_end is not None:
+        wanted = set(range(d_start.year, d_end.year + 1))
+        missing = sorted(wanted - set(year_count))
+        outside = sorted(set(year_count) - wanted)
+        if missing:
+            problems.append(f"`period.groups`에 분석 기간({d_start.year}~{d_end.year}년)의 연도 {missing}이(가) "
+                            "어느 기간에도 들어 있지 않습니다")
+        if outside:
+            problems.append(f"`period.groups`에 분석 기간({d_start.year}~{d_end.year}년) 밖의 연도 {outside}이(가) 있습니다")
+    if unit is not _MISSING and unit != "year":
+        problems.append(f"`period.groups`가 있으면 `period.unit`은 year여야 합니다: {unit!r}")
+
+
+def _check_occupation_filters(cfg: dict, need, problems: list[str]) -> None:
+    ex = need("occupations.exclude_keco2")
+    if ex is not _MISSING:
+        if not (isinstance(ex, list) and all(isinstance(c, str) and re.fullmatch(r"\d{2}", c) for c in ex)):
+            problems.append(f"`occupations.exclude_keco2`는 숫자 2자리 문자열의 목록이어야 합니다(비어도 됩니다): {ex!r}")
+        else:
+            keco4 = _get(cfg, "occupations.keco4")
+            if isinstance(keco4, list):
+                left = [c for c in keco4 if isinstance(c, str) and c[:2] in ex]
+                if left:
+                    problems.append(f"`occupations.keco4`에 `occupations.exclude_keco2`로 뺀 중분류의 세분류가 남아 있습니다: {left}")
+    g = need("occupations.group_min_treated")
+    if g is not _MISSING and (not _is_int(g) or g < 1):
+        problems.append(f"`occupations.group_min_treated`는 1 이상의 정수여야 합니다: {g!r}")
+
+
+def _check_merge_sido(merge, problems: list[str]) -> None:
+    if not isinstance(merge, dict):
+        problems.append(f"`region.merge_sido`는 사전이어야 합니다: {merge!r}")
+        return
+    seen: dict[str, int] = {}
+    for label, names in merge.items():
+        if not _is_str_list(names, allow_empty=False):
+            problems.append(f"`region.merge_sido`의 {label!r} 값은 시도 이름(빈 문자열이 아닌 문자열)이 하나 이상 든 "
+                            f"목록이어야 합니다: {names!r}")
+            continue
+        for n in set(names):
+            seen[n] = seen.get(n, 0) + 1
+    twice = sorted(n for n, c in seen.items() if c > 1)
+    if twice:
+        problems.append(f"`region.merge_sido`에서 한 시도 이름이 두 묶음에 듭니다: {twice}")
+
+
 def validate_config(cfg: dict) -> None:
     """설정을 확인하고, 잘못된 항목이 있으면 항목 이름과 문제를 모두 적은 ValueError를 낸다."""
     problems: list[str] = []
@@ -130,9 +211,40 @@ def validate_config(cfg: dict) -> None:
     if unit is not _MISSING and unit not in PERIOD_UNITS:
         problems.append(f"`period.unit`은 {PERIOD_UNITS} 가운데 하나여야 합니다: {unit!r}")
 
+    date_cols = need("period.date_columns")
+    if date_cols is not _MISSING and not _is_str_list(date_cols, allow_empty=False):
+        problems.append("`period.date_columns`는 열 이름(빈 문자열이 아닌 문자열)이 하나 이상 든 목록이어야 합니다: "
+                        f"{date_cols!r}")
+    groups = need("period.groups")
+    if groups is not _MISSING:
+        _check_period_groups(groups, unit, d_start, d_end, problems)
+
+    _check_occupation_filters(cfg, need, problems)
+
+    not_in_table = need("industry.not_in_table")
+    if not_in_table is not _MISSING and not_in_table not in INDUSTRY_NOT_IN_TABLE:
+        problems.append(f"`industry.not_in_table`은 {INDUSTRY_NOT_IN_TABLE} 가운데 하나여야 합니다: {not_in_table!r}")
+
+    merge = need("region.merge_sido")
+    if merge is not _MISSING:
+        _check_merge_sido(merge, problems)
+
+    for key in ("skills.adjacent_candidate_details", "skills.placebo_candidate_domains"):
+        v = need(key)
+        if v is not _MISSING and not _is_str_list(v, allow_empty=True):
+            problems.append(f"`{key}`는 빈 문자열이 아닌 문자열의 목록이어야 합니다(비어도 됩니다): {v!r}")
+
+    for key in ("data.aiie", "data.naics_isic", "data.ksic_isic"):   # 파일이 있는지는 읽는 함수가 확인한다
+        v = _get(cfg, key)
+        if v is not _MISSING and not (isinstance(v, str) and v.strip()):
+            problems.append(f"`{key}`는 빈 문자열이 아닌 경로 문자열이어야 합니다: {v!r}")
+
     strict_ok = _check_patterns(cfg, "treatment.keywords.strict", True, problems)
     extra_ok = _check_patterns(cfg, "treatment.keywords.broad_extra", False, problems)
     exclude_ok = _check_patterns(cfg, "treatment.keywords.exclude", False, problems)
+    use_ok = _check_patterns(cfg, "treatment.keywords.use", True, problems)
+    if use_ok:
+        _check_joined(_get(cfg, "treatment.keywords.use"), "treatment.keywords.use", "모두", problems)
     # 하나씩 확인해 문제가 없는 목록만, 코드가 쓰는 대로 이어 붙여 다시 확인한다(`treatment.keyword_lists`)
     strict = _get(cfg, "treatment.keywords.strict")
     if strict_ok and _check_joined(strict, "treatment.keywords.strict", "모두", problems) and extra_ok:

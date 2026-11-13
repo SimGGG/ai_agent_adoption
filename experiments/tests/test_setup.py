@@ -7,7 +7,7 @@ def test_paths_point_inside_project():
 
 def test_config_carries_decisions():
     cfg = paths.load_config()
-    assert len(cfg["occupations"]["keco4"]) == 28
+    assert len(cfg["occupations"]["keco4"]) == 25
     assert cfg["occupations"]["min_use_postings"] == 30
     assert cfg["treatment"]["agent_skills"]["v31_prefix"] == "IT-06-012-"
     assert len(cfg["treatment"]["agent_skills"]["move_to_dev"]) == 5

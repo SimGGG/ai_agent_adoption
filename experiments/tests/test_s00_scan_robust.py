@@ -30,6 +30,7 @@ def _two_year_cfg(synth_data):
     cfg = synth_data["cfg"]
     cfg["data"]["years"] = [2023, 2024]
     cfg["period"]["start"], cfg["period"]["end"] = "2023-01-01", "2024-12-31"
+    cfg["period"]["groups"] = [{"name": "초기", "years": [2023, 2024]}]
     return cfg
 
 

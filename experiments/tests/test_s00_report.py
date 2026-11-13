@@ -210,7 +210,7 @@ def test_report_wording(synth_data, tmp_path):
     s00, t = run(synth_data, tmp_path)
     text = s00.write_report(t, _NO_TIMING, synth_data["cfg"], tmp_path / "report.md", commit="c").read_text(encoding="utf-8")
     assert "## 1. 제외 규칙 단계별 공고 수 (연도별): 분석 기간, 분석 대상 직종 한정" in text
-    assert "(기간 단위: 분기 (`quarter`))" in text
+    assert "(기간 단위: 연 (`year`))" in text
     assert text.index("희소 필터는 출현율이") < text.index("### `t03b_sparse_filter_grid`")
     assert text.index("## 7. ") < text.index("결과모형은 공고의 특성으로") < text.index("## 8. ")
     notes = s00._table_notes(synth_data["cfg"])

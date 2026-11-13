@@ -229,6 +229,10 @@ def write_all(root: Path) -> dict:
     cfg["data"]["keco"] = "data/postings/KECO2025.xlsx"
     cfg["data"]["ked_firm"] = "data/ked/KED5002.txt"
     cfg["occupations"]["keco4"] = ["1332", "0262"]
+    cfg["occupations"]["exclude_keco2"] = ["01", "61"]
+    # 가상 공고의 게시일은 모두 2025년이다
+    cfg["period"]["start"], cfg["period"]["end"] = "2025-01-01", "2025-12-31"
+    cfg["period"]["groups"] = [{"name": "가상 기간", "years": [2025]}]
     cfg["treatment"]["agent_skills"]["move_to_dev"] = ["IT-05-0413"]
     return {
         "root": root,
