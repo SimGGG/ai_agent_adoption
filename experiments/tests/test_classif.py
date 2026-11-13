@@ -30,7 +30,8 @@ def test_keco_mid():
 
 
 def test_loaders_read_synthetic_tables(synth_data):
-    assert classif.load_ksic_sub(synth_data["ksic"]) == {"620", "862", "012"}
+    # 최종 검토 수정: 가상 산업분류표에 011, 981을 더해 {620, 862, 012}에서 바꿨다
+    assert classif.load_ksic_sub(synth_data["ksic"]) == {"620", "862", "011", "012", "981"}
     keco = classif.load_keco(synth_data["keco"])
     assert keco["keco4"].tolist() == ["1332", "0262", "9052"]
     assert set(keco.columns) == {"keco4", "keco4_name", "keco2", "keco2_name"}

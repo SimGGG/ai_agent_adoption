@@ -110,7 +110,7 @@ def test_unusable_dates_names_missing_columns():
 def test_base_uses_post_end_when_post_start_is_missing(base, synth_data):       # base: 이 파일의 기존 고정물
     """가상 공고 가운데 게시일이 없고 마감일만 있는 공고는 마감일의 연도·월·기간을 갖고 분석 기간 안에 든다.
     둘 다 없는 공고는 연도가 결측이고 분석 기간 밖이다."""
-    by_id = base   # 이 파일의 base 고정물은 이미 posting_id를 번호표로 쓴다
+    by_id = base   # 이 파일의 base 고정물은 이미 posting_id를 색인으로 쓴다
     assert by_id.loc[synth.ID_END_ONLY, "date_source"] == "post_end"
     assert by_id.loc[synth.ID_END_ONLY, "in_period"] and by_id.loc[synth.ID_END_ONLY, "period"] == synth.PERIOD_NAME
     # 과제 3 수정 1차: 월, 분기, 업력도 마감일로 계산한다(업력 = 마감일의 연도 - KED 설립 연도)
@@ -179,7 +179,7 @@ def test_period_compares_dates_not_times(synth_data):
     assert b["in_period"].tolist() == [True, True, False, False]
 
 def test_apply_exclusions_keeps_input_index_labels(base, synth_data):
-    # 전체 검토 수정에서 더한 시험. 스크립트의 `_exclusions`는 남은 행의 번호표로 위치를 찾는다.
+    # 전체 검토 수정에서 더한 시험. 스크립트의 `_exclusions`는 남은 행의 색인으로 위치를 찾는다.
     b = base.reset_index()
     b.index = b.index * 10 + 3
     kept, _ = sample.apply_exclusions(b, synth_data["cfg"])

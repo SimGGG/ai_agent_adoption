@@ -62,6 +62,7 @@ _BAD = [
     ("treatment.keywords.use", [], "treatment.keywords.use"),
     ("treatment.keywords.use", ["GPT", "("], "treatment.keywords.use"),
     ("data.aiie", "", "data.aiie"),
+    ("period.date_columns", ["post_start", "post_end", "post_start"], r"period\.date_columns`에 같은 열 이름"),   # 최종 검토 수정
 ]
 
 
@@ -131,6 +132,12 @@ def test_patterns_are_also_checked_joined(key, value):
     with pytest.raises(ValueError, match=key.replace(".", r"\.")) as e:
         validate.validate_config(_set(paths.load_config(), key, value))
     assert "이어 붙인" in str(e.value)
+
+
+def test_empty_use_dictionary_explains_the_comparison_group():    # 최종 검토 수정에서 더했다
+    with pytest.raises(ValueError, match="treatment.keywords.use") as e:
+        validate.validate_config(_set(paths.load_config(), "treatment.keywords.use", []))
+    assert "본문이 있는 모든 공고" in str(e.value) and "비교 공고" in str(e.value)
 
 
 def test_inline_flag_at_the_start_of_a_joined_list_passes():

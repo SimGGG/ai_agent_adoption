@@ -66,6 +66,12 @@ def test_shipped_table_covers_every_sub_class_once():
     assert k.loc[k["isic"] != "", "isic"].str.fullmatch(r"\d{2,4}(;\d{2,4})*").all()
 
 
+def test_ksic_isic_subs_lists_every_row_including_empty_isic(tmp_path):   # 최종 검토 수정에서 더했다
+    path = synth.write_external(tmp_path)["ksic_isic"]
+    assert confounders.ksic_isic_subs(path) == {"011", "012", "620", "862", "981"}   # 981은 `isic`이 비었다
+    assert "981" not in set(confounders.load_ksic_isic(path)["ksic_sub"])           # load_ksic_isic은 그대로이다
+
+
 def test_missing_file_names_the_path(tmp_path):
     with pytest.raises(FileNotFoundError, match="ksic10_sub_to_isic4.csv"):
         confounders.load_ksic_isic(tmp_path / "ksic10_sub_to_isic4.csv")

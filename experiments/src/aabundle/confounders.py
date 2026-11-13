@@ -125,12 +125,10 @@ def load_aiie(path: Path, naics4_all: set[str]) -> pd.DataFrame:
     return out.sort_values("naics4").astype({"naics4": object, "aiie": "float64"}).reset_index(drop=True)
 
 
-def load_ksic_isic(path: Path) -> pd.DataFrame:
-    """판단으로 만든 KSIC 소분류 → ISIC Rev.4 표를 읽어 한 줄에 앞자리 하나가 되게 편다(열 `ksic_sub`, `isic_prefix`).
+def _read_ksic_isic(path: Path) -> tuple[pd.DataFrame, pd.Series, Path]:
+    """판단으로 만든 KSIC-ISIC 표를 읽어 (표, 앞뒤 공백을 지운 `ksic_sub`, 경로)를 돌려준다.
 
-    표의 머리글은 `ksic_sub,ksic_name,isic,note`이고 `isic` 열은 ISIC 코드의 앞자리(2~4자리)를 `;`로 이은 것이다.
-    `isic`이 빈 소분류(ISIC에 이을 곳이 없는 소분류)는 줄이 없다. `ksic_sub`가 겹치거나 숫자 3자리가 아니면
-    `ValueError`를 낸다.
+    머리글이 `KSIC_ISIC_COLUMNS`가 아니면 `KeyError`를, `ksic_sub`가 겹치거나 숫자 3자리가 아니면 `ValueError`를 낸다.
     """
     path = _require_file(path, "KSIC-ISIC 연계표")
     table = pd.read_csv(path, dtype=str, keep_default_na=False, encoding="utf-8-sig")
@@ -143,6 +141,26 @@ def load_ksic_isic(path: Path) -> pd.DataFrame:
     dup = sorted(set(sub[sub.duplicated()]))
     if dup:
         raise ValueError(f"{path.name}의 `ksic_sub`가 겹칩니다: {dup}")
+    return table, sub, path
+
+
+def ksic_isic_subs(path: Path) -> set[str]:
+    """판단으로 만든 KSIC-ISIC 표의 모든 줄의 소분류(`ksic_sub`) 집합. `isic`이 빈 줄의 소분류도 든다.
+
+    산업분류표의 소분류와 같은지 확인하는 데 쓴다. 표를 확인하는 규칙은 `load_ksic_isic`과 같다.
+    """
+    _, sub, _ = _read_ksic_isic(path)
+    return set(sub)
+
+
+def load_ksic_isic(path: Path) -> pd.DataFrame:
+    """판단으로 만든 KSIC 소분류 → ISIC Rev.4 표를 읽어 한 줄에 앞자리 하나가 되게 편다(열 `ksic_sub`, `isic_prefix`).
+
+    표의 머리글은 `ksic_sub,ksic_name,isic,note`이고 `isic` 열은 ISIC 코드의 앞자리(2~4자리)를 `;`로 이은 것이다.
+    `isic`이 빈 소분류(ISIC에 이을 곳이 없는 소분류)는 줄이 없다(그런 소분류까지 모두 보려면 `ksic_isic_subs`).
+    `ksic_sub`가 겹치거나 숫자 3자리가 아니면 `ValueError`를 낸다.
+    """
+    table, sub, path = _read_ksic_isic(path)
     long = pd.DataFrame({"ksic_sub": sub, "isic_prefix": table["isic"].str.split(";")}).explode("isic_prefix")
     long["isic_prefix"] = long["isic_prefix"].str.strip()
     long = long[long["isic_prefix"] != ""]

@@ -49,8 +49,9 @@ def _as_date(v):
     return None
 
 
-def _check_patterns(cfg: dict, key: str, required: bool, problems: list[str]) -> bool:
-    """표현을 하나씩 확인한다. 문제가 없으면 True를 돌려준다."""
+def _check_patterns(cfg: dict, key: str, required: bool, problems: list[str],
+                    empty_reason: str = "비어 있으면 처치 공고를 정할 수 없습니다") -> bool:
+    """표현을 하나씩 확인한다. 문제가 없으면 True를 돌려준다. `empty_reason`은 필요한 목록이 비었을 때의 설명이다."""
     n_before = len(problems)
     patterns = _get(cfg, key)
     if patterns is _MISSING:
@@ -60,7 +61,7 @@ def _check_patterns(cfg: dict, key: str, required: bool, problems: list[str]) ->
         problems.append(f"`{key}`는 목록이어야 합니다")
         return False
     if required and not patterns:
-        problems.append(f"`{key}`가 비어 있습니다. 비어 있으면 처치 공고를 정할 수 없습니다")
+        problems.append(f"`{key}`가 비어 있습니다. {empty_reason}")
     for i, p in enumerate(patterns):
         if not isinstance(p, str) or not p.strip():
             problems.append(f"`{key}`의 {i + 1}번째 표현이 비어 있거나 문자열이 아닙니다. "
@@ -215,6 +216,10 @@ def validate_config(cfg: dict) -> None:
     if date_cols is not _MISSING and not _is_str_list(date_cols, allow_empty=False):
         problems.append("`period.date_columns`는 열 이름(빈 문자열이 아닌 문자열)이 하나 이상 든 목록이어야 합니다: "
                         f"{date_cols!r}")
+    elif date_cols is not _MISSING:
+        dup_cols = sorted({c for c in date_cols if date_cols.count(c) > 1})
+        if dup_cols:
+            problems.append(f"`period.date_columns`에 같은 열 이름이 두 번 이상 있습니다: {dup_cols}")
     groups = need("period.groups")
     if groups is not _MISSING:
         _check_period_groups(groups, unit, d_start, d_end, problems)
@@ -242,7 +247,9 @@ def validate_config(cfg: dict) -> None:
     strict_ok = _check_patterns(cfg, "treatment.keywords.strict", True, problems)
     extra_ok = _check_patterns(cfg, "treatment.keywords.broad_extra", False, problems)
     exclude_ok = _check_patterns(cfg, "treatment.keywords.exclude", False, problems)
-    use_ok = _check_patterns(cfg, "treatment.keywords.use", True, problems)
+    use_ok = _check_patterns(cfg, "treatment.keywords.use", True, problems,
+                             "비어 있으면 표현을 이어 붙인 식이 빈 식이 되어 본문이 있는 모든 공고에 걸리고, 걸린 공고는 "
+                             "비교 공고에서 빠지므로 본문이 없는 공고 말고는 비교 공고가 남지 않습니다")
     if use_ok:
         _check_joined(_get(cfg, "treatment.keywords.use"), "treatment.keywords.use", "모두", problems)
     # 하나씩 확인해 문제가 없는 목록만, 코드가 쓰는 대로 이어 붙여 다시 확인한다(`treatment.keyword_lists`)

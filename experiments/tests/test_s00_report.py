@@ -180,7 +180,9 @@ def test_post_start_missing_and_other_region_words_in_report(synth_data, tmp_pat
     assert sec(11) < text.index("### `t12_sido_other`") < text.index("### `t12b_sido_other_words`")
     assert "#### `level` = 연도\n" in text and "#### `level` = 연도·수집 사이트" in text
     notes = s00._table_notes(synth_data["cfg"])
-    assert "`post_start` 결측" in notes["t01_exclusions"] and "t01b_post_start_missing" in notes["t01_exclusions"]
+    # 최종 검토 수정: "`post_start` 결측이면"을 "게시일(`post_start`)을 날짜로 쓸 수 없으면"으로 바꿨다
+    assert "게시일(`post_start`)을 날짜로 쓸 수 없으면" in notes["t01_exclusions"]
+    assert "t01b_post_start_missing" in notes["t01_exclusions"]
 
 
 def test_report_requires_the_new_interim_files(synth_data, tmp_path):
@@ -457,11 +459,12 @@ def test_t15_aiie_coverage(tables, synth_scan, synth_data, tmp_path):
     assert sub.isna().sum() >= 1
     assert g.loc["전체", "n_with_aiie"] == sub.isin(synth.SUBS_WITH_AIIE).sum()
     assert g.loc["전체", "n"] - g.loc["전체", "n_with_aiie"] >= sub.isna().sum()
-    # 값이 붙은 소분류 수와 전체 소분류 수(가상 산업분류표의 620, 862, 012 가운데 620, 862)를 설명에 적는다
+    # 값이 붙은 소분류 수와 전체 소분류 수(가상 산업분류표의 620, 862, 011, 012, 981 가운데 620, 862)를 설명에 적는다.
+    # 최종 검토 수정: 가상 산업분류표에 011, 981을 더해 "소분류 3개"에서 "소분류 5개"로 바꿨다
     text = s00.write_report(tables, _NO_TIMING, synth_data["cfg"], tmp_path / "report.md", commit="c").read_text(
         encoding="utf-8")
     sec13 = text[text.index("## 13. "):text.index("## 14. ")]
-    assert "소분류 3개 가운데 AIIE 값이 붙은 소분류는 2개" in sec13
+    assert "소분류 5개 가운데 AIIE 값이 붙은 소분류는 2개" in sec13
     assert "한국표준산업분류(KSIC)" in sec13 and "국제표준산업분류(ISIC Rev.4)" in sec13 and "미국 산업분류(NAICS)" in sec13
 
 
@@ -482,3 +485,163 @@ def test_t15_is_skipped_without_external_files(synth_scan, tmp_path, how):
     sec13 = text[text.index("## 13. "):text.index("## 14. ")]
     assert "외부 자료가 없어 만들지 않았다" in sec13 and shown in sec13
     assert "### `t15_aiie_coverage`" not in text
+
+
+# 아래는 최종 검토 수정에서 더한 시험이다.
+
+def test_kw_use_note_names_every_definition_that_treats_it(synth_data):
+    s00 = load_script()
+    assert "`use_keyword`나 `use_any`일 때 처치 공고" in s00._KW_USE_NOTE
+    assert "어떤 정의에서도 비교 공고는 아니다" in s00._KW_USE_NOTE and "에서만" not in s00._KW_USE_NOTE
+    notes = s00._table_notes(synth_data["cfg"])
+    assert s00._KW_USE_NOTE in notes["t02a_treated_by_period"] and s00._KW_USE_NOTE in notes["t02b_treated_by_occ"]
+
+
+# 손으로 만든 공고 9건: (사업자번호, 연도, 세분류, 처치 정의로 나눈 값, AI 에이전트 숙련코드를 뺀 숙련 수, 본문 글자 수).
+# 처치 정의로 나눈 값은 1이 처치 공고, 0이 비교 공고, -1이 어느 쪽도 아닌 공고(키워드에만 걸린 공고 등)이다.
+# 사업자번호는 가상 값이다.
+_FIRM_A, _FIRM_B = "1000000001", "1000000002"
+_HAND_ROWS = [
+    (_FIRM_A, 2024, "1332", 0, 1, 100),   # 0: A가 처치 공고를 처음 낸 해(2025) 전의 비교 공고
+    (_FIRM_A, 2024, "0262", 0, 2, 200),   # 1: 위와 같다
+    (_FIRM_A, 2025, "1332", 1, 4, 400),   # 2: A의 첫 처치 공고
+    (_FIRM_A, 2025, "1332", 0, 2, 100),   # 3: 2와 같은 기업·연도·세분류의 비교 공고
+    (_FIRM_B, 2024, "0262", 1, 3, 300),   # 4: B의 첫 처치 공고. 같은 해에 B의 비교 공고는 없다
+    (_FIRM_B, 2025, "0262", 1, 5, 500),   # 5: B의 처치 공고
+    (_FIRM_B, 2025, "0262", -1, 9, 900),  # 6: 5와 같은 기업·연도·세분류이지만 비교 공고가 아니다
+    (_FIRM_B, 2025, "1332", 0, 1, 50),    # 7: 5와 같은 기업·연도, 다른 세분류의 비교 공고
+    (None, 2025, "1332", 1, 6, 600),      # 8: 사업자번호가 없는 처치 공고(기업별 집계에서 빠진다)
+]
+
+
+def _hand_built():
+    rows = pd.DataFrame(_HAND_ROWS, columns=["bzno", "year", "keco4", "arm", "n_skills", "text_len"])
+    base = rows[["bzno", "year", "keco4", "text_len"]].copy()
+    outcome = pd.DataFrame({"pos": np.repeat(np.arange(len(rows)), rows["n_skills"].to_numpy()), "skill_code": "S1"})
+    return base, outcome, rows["arm"].to_numpy(dtype="int64")
+
+
+def test_t16_on_hand_built_postings():
+    s00 = load_script()
+    base, outcome, arm = _hand_built()
+    t = s00._t16_detail_by_arm(base, outcome, arm).set_index("arm")
+    # 처치 공고 2, 4, 5, 8: 숙련 수 4, 3, 5, 6 / 글자 수 400, 300, 500, 600
+    assert t.loc["처치 공고", "n"] == 4 and t.loc["처치 공고", "n_skills_mean"] == pytest.approx(4.5)
+    assert t.loc["처치 공고", ["n_skills_p50", "n_skills_p75", "n_skills_p90"]].tolist() == pytest.approx([4.5, 5.25, 5.7])
+    assert t.loc["처치 공고", ["text_len_mean", "text_len_p50"]].tolist() == pytest.approx([450.0, 450.0])
+    # 비교 공고 0, 1, 3, 7: 숙련 수 1, 2, 2, 1 / 글자 수 100, 200, 100, 50
+    assert t.loc["비교 공고", "n"] == 4 and t.loc["비교 공고", "n_skills_mean"] == pytest.approx(1.5)
+    assert t.loc["비교 공고", ["text_len_mean", "text_len_p50"]].tolist() == pytest.approx([112.5, 100.0])
+    # 두 집단이 모두 있는 칸: (0262, 2024) 처치 1건(3, 300) − 비교 1건(2, 200) = (1, 100), 가중치 1.
+    # (1332, 2025) 처치 2건 평균(5, 500) − 비교 2건 평균(1.5, 75) = (3.5, 425), 가중치 2.
+    # (1332, 2024)는 비교 공고만, (0262, 2025)는 처치 공고만 있다(6은 비교 공고가 아니다).
+    w = t.loc["같은 세분류·연도 안의 차이"]
+    assert w["n"] == 3
+    assert w["n_skills_mean"] == pytest.approx((1 * 1 + 3.5 * 2) / 3)
+    assert w["text_len_mean"] == pytest.approx((100 * 1 + 425 * 2) / 3)
+
+
+def test_t17_on_hand_built_postings():
+    s00 = load_script()
+    base, _, arm = _hand_built()
+    v = s00._t17_firm_treated(base, arm).set_index("key")["값"]
+    # 사업자번호가 있는 처치 공고 2, 4, 5: A 1건, B 2건
+    assert v["n_treated"] == 3 and v["n_firms_treated"] == 2
+    assert v["treated_per_firm_p50"] == pytest.approx(1.5) and v["treated_per_firm_max"] == 2
+    assert v["top_firms_share"] == pytest.approx(1.0)
+    # 같은 기업·연도에 비교 공고가 있는 처치 공고: 2(3이 있다), 5(7이 있다). 4는 없다
+    assert v["n_treated_same_firm_year"] == 2 and v["same_firm_year_rate"] == pytest.approx(2 / 3)
+    assert v["n_firms_same_firm_year"] == 2
+    # 같은 세분류까지 같은 비교 공고: 2만(3). 5는 같은 칸에 비교 공고가 아닌 공고 6만 있어 세지 않는다.
+    # 비교 공고 대신 처치 공고가 아닌 모든 공고와 비교했다면 2가 된다
+    assert v["n_treated_same_firm_year_occ"] == 1 and v["same_firm_year_occ_rate"] == pytest.approx(1 / 3)
+
+
+def test_t18_on_hand_built_postings():
+    s00 = load_script()
+    base, _, arm = _hand_built()
+    t = s00._t18_first_treated_firms(base, arm)
+    assert list(t.columns) == ["first_year", "n_firms", "n_firms_with_earlier", "n_earlier_postings"]
+    # B는 2024년에 처음 처치 공고를 냈고 그 전 비교 공고가 없다. A는 2025년에 처음 냈고 2024년 비교 공고가 2건(0, 1)이다.
+    # A의 2025년 비교 공고 3은 그 전 연도가 아니므로 세지 않는다
+    assert t.to_dict("list") == {"first_year": [2024, 2025], "n_firms": [1, 1], "n_firms_with_earlier": [0, 1],
+                                 "n_earlier_postings": [0, 2]}
+
+
+def test_t02d_date_source_by_period(tables, synth_data, tmp_path):
+    t = tables["t02d_date_source_by_period"]
+    assert list(t.columns) == ["period", "date_source", "n", "n_treated", "share_in_period", "treated_share_in_period"]
+    # 네 단계를 통과한 공고 10건 가운데 ID_END_ONLY(p13)만 마감일로 게시일을 정했다. 처치 공고 p02, p05는 게시일이 있다
+    assert t["period"].tolist() == [synth.PERIOD_NAME] * 2 and t["date_source"].tolist() == ["post_start", "post_end"]
+    assert t["n"].tolist() == [9, 1] and t["n_treated"].tolist() == [2, 0]
+    assert t["share_in_period"].tolist() == pytest.approx([0.9, 0.1])
+    assert t["treated_share_in_period"].tolist() == pytest.approx([1.0, 0.0])
+    s00 = load_script()
+    text = s00.write_report(tables, _NO_TIMING, synth_data["cfg"], tmp_path / "report.md", commit="c").read_text(
+        encoding="utf-8")
+    assert text.index("### `t02c_occ_group_treated`") < text.index("### `t02d_date_source_by_period`") < text.index("## 3. ")
+    note = s00._table_notes(synth_data["cfg"])["t02d_date_source_by_period"]
+    assert "마감일은 실제 게시일보다 늦으므로" in note and "기간 구분이 덜 정확하다" in note
+
+
+def test_t01b_note_and_all_rows_in_report(synth_data):
+    s00 = load_script()
+    note = s00._table_notes(synth_data["cfg"])["t01b_post_start_missing"]
+    assert "`n_in_occ_no_post_start − n_in_occ_no_date − n_in_occ_from_end_in_period`" in note
+    assert s00.REPORT_MAX_ROWS_BY_TABLE["t01b_post_start_missing"] is None
+    sites = pd.DataFrame({"level": "연도·수집 사이트", "year": 2023, "source": [f"사이트{i:02d}" for i in range(40)],
+                          "n_no_post_start": 1})
+    block = "\n".join(s00._table_block("t01b_post_start_missing", sites, "설명"))
+    assert all(f"| 사이트{i:02d} |" in block for i in range(40)) and "위 30행만" not in block
+
+
+def test_report_words_after_final_review(tables, synth_data, tmp_path):
+    s00 = load_script()
+    text = s00.write_report(tables, _NO_TIMING, synth_data["cfg"], tmp_path / "report.md", commit="c").read_text(
+        encoding="utf-8")
+    assert "글자열" not in text and "문자열" in s00._table_notes(synth_data["cfg"])["t16_detail_by_arm"]
+    assert "`post_start` 결측" not in text
+
+
+@pytest.mark.parametrize("change", ["candidates", "keco"])
+def test_all_checks_report_inputs_before_the_scan(synth_data, tmp_path, monkeypatch, change):
+    s00 = load_script()
+    cfg = copy.deepcopy(synth_data["cfg"])
+    if change == "candidates":
+        cfg["skills"]["adjacent_candidate_details"] = ["없는세부분류"]
+        cfg["skills"]["placebo_candidate_domains"] = ["없는대분류"]
+        expected, message = ValueError, None
+    else:
+        (synth_data["root"] / cfg["data"]["keco"]).unlink()
+        expected, message = FileNotFoundError, "KECO2025.xlsx"
+    monkeypatch.setattr(s00.paths, "ROOT", synth_data["root"])
+    monkeypatch.setattr(s00.paths, "S0", tmp_path / "s0cli")
+    monkeypatch.setattr(s00.paths, "load_config", lambda: cfg)
+    with pytest.raises(expected, match=message) as e:
+        s00.main(["all"])
+    if change == "candidates":   # 두 설정 항목의 없는 이름을 한 번에 적는다
+        assert "없는세부분류" in str(e.value) and "없는대분류" in str(e.value)
+    s0 = tmp_path / "s0cli"
+    assert not s0.exists() or not any(s0.iterdir())      # 1단계(scan)가 중간 자료를 쓰기 전에 멈춘다
+
+
+def test_all_still_skips_t15_without_external_files(synth_data, tmp_path, monkeypatch):
+    s00 = load_script()
+    (synth_data["root"] / synth_data["cfg"]["data"]["aiie"]).unlink()
+    monkeypatch.setattr(s00.paths, "ROOT", synth_data["root"])
+    monkeypatch.setattr(s00.paths, "S0", tmp_path / "s0cli")
+    monkeypatch.setattr(s00.paths, "load_config", lambda: synth_data["cfg"])
+    assert s00.main(["all"]) == 0
+    assert "외부 자료가 없어 만들지 않았다" in (synth_data["root"] / "docs" / "s0-data-audit.md").read_text(encoding="utf-8")
+
+
+def test_crosswalk_and_ksic_table_must_list_the_same_sub_classes(synth_scan):
+    s00, root = synth_scan["s00"], synth_scan["root"]
+    path = root / synth_scan["cfg"]["data"]["ksic_isic"]
+    lines = path.read_text(encoding="utf-8").splitlines()
+    # 산업분류표에 있는 862를 빼고, 산업분류표에 없는 999를 더한다
+    lines = [ln for ln in lines if not ln.startswith("862,")] + ["999,가상 소분류,620,"]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="862") as e:
+        s00.build_tables(synth_scan["cfg"], root, synth_scan["s0_dir"])
+    assert "999" in str(e.value)

@@ -126,7 +126,7 @@ def unusable_dates(raw: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     """`columns`의 열마다, 값은 있지만 `posting_date`가 날짜로 쓰지 못하는 칸을 참으로 표시한 표를 돌려준다.
 
     값이 있다는 것은 결측이 아니고 빈 문자열이나 공백뿐인 문자열도 아니라는 뜻이다. 날짜로 쓰지 못하는 값은
-    읽을 수 없는 글자와 `posting_date`가 받는 범위 밖의 날짜이다. 번호표는 `raw`와 같다.
+    읽을 수 없는 글자와 `posting_date`가 받는 범위 밖의 날짜이다. 색인은 `raw`와 같다.
     """
     _require_columns(raw, columns)
     out = {}

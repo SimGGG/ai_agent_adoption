@@ -1,3 +1,4 @@
+import datetime as dt
 import importlib.util, pandas as pd, paths
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -48,12 +49,15 @@ MISSING_POST_START = {"p02": None, "p07": None}
 OTHER_REGIONS = {"p05": "광산구 어딘가", "p09": "광산구", "p11": "아시아·중동", "p12": "가" * 25, "p07": "광산구"}
 
 
-def rewrite_postings(synth_data, post_start=MISSING_POST_START, region=OTHER_REGIONS):
-    """2025년 가상 공고 파일에서 지정한 공고의 게시일과 근무지를 바꿔 다시 쓴다(시험 안에서만)."""
+def rewrite_postings(synth_data, post_start=MISSING_POST_START, region=OTHER_REGIONS, post_end=None):
+    """2025년 가상 공고 파일에서 지정한 공고의 게시일, 근무지, 마감일을 바꿔 다시 쓴다(시험 안에서만).
+
+    `post_end`는 최종 검토 수정에서 더했다. 주지 않으면 마감일은 바꾸지 않는다."""
     path = rawio.posting_path(synth_data["postings_dir"], 2025)
     t = pq.read_table(path)
     ids = t.column("posting_id").to_pylist()
-    for col, changes, typ in (("post_start", post_start, pa.date32()), ("region", region, pa.string())):
+    for col, changes, typ in (("post_start", post_start, pa.date32()), ("post_end", post_end or {}, pa.date32()),
+                              ("region", region, pa.string())):
         values = [changes.get(i, v) for i, v in zip(ids, t.column(col).to_pylist())]
         t = t.set_column(t.schema.get_field_index(col), col, pa.array(values, typ))
     pq.write_table(t, path, row_group_size=5)
@@ -171,3 +175,51 @@ def test_scan_counts_use_dictionary_patterns(scan_out, synth_data):
     assert kw.loc[(kw["dictionary"] == "broad_extra") & (kw["pattern"] == "Claude"), "n"].sum() == 1
     treat = pd.read_parquet(scan_out["treat"])
     assert by_pattern.max() <= treat["kw_use"].sum()                         # kw_use가 참인 공고 안에서만 센다
+
+
+# 아래는 최종 검토 수정에서 더한 시험이다.
+
+def test_fallback_date_outside_the_period_is_dropped_but_counted(synth_data, tmp_path, s00):
+    # 분석 기간을 2025~2026년으로 넓히고(기간 둘), 분석 대상 세분류(1332)의 두 공고에서 게시일을 지운다.
+    # p12는 마감일이 공고 파일의 연도(2025)와 다른 해이지만 분석 기간 안(2026-01-15)이어서 남고,
+    # p11은 마감일이 분석 기간 밖(2027-01-15)이어서 빠진다.
+    cfg = synth_data["cfg"]
+    cfg["period"]["end"] = "2026-12-31"
+    cfg["period"]["groups"] = [{"name": synth.PERIOD_NAME, "years": [2025]}, {"name": "가상 기간 2", "years": [2026]}]
+    rewrite_postings(synth_data, post_start={"p11": None, "p12": None}, region={},
+                     post_end={"p11": dt.date(2027, 1, 15), "p12": dt.date(2026, 1, 15)})
+    out = s00.scan(cfg, synth_data["root"], tmp_path / "s0")
+    base = pd.read_parquet(out["base"]).set_index("posting_id")
+    assert "p11" not in base.index
+    assert base.loc["p12", "date_source"] == "post_end" and base.loc["p12", "year"] == 2026
+    total = pd.read_parquet(out["post_start_missing"]).drop(columns=["year", "source"]).sum()
+    assert total["n_in_occ_no_post_start"] == 5        # p11, p12, ID_END_ONLY, ID_NO_DATE, ID_END_UNUSABLE
+    assert total["n_in_occ_no_date"] == 2              # ID_NO_DATE, ID_END_UNUSABLE
+    assert total["n_in_occ_from_end_in_period"] == 2   # p12, ID_END_ONLY
+    # 마감일로 정한 게시일이 분석 기간 밖인 공고(p11)가 있어 부등호가 등호가 아니다
+    assert total["n_in_occ_no_post_start"] - total["n_in_occ_no_date"] > total["n_in_occ_from_end_in_period"]
+
+
+def _add_date_column(synth_data, name: str, values: dict) -> None:
+    """2025년 가상 공고 파일에 날짜 열 하나를 더해 다시 쓴다. `values`는 {공고 번호: 날짜}이고 나머지는 결측이다."""
+    path = rawio.posting_path(synth_data["postings_dir"], 2025)
+    t = pq.read_table(path)
+    ids = t.column("posting_id").to_pylist()
+    t = t.append_column(name, pa.array([values.get(i) for i in ids], pa.date32()))
+    pq.write_table(t, path, row_group_size=5)
+
+
+def test_scan_reads_a_configured_date_column_outside_the_raw_columns(synth_data, tmp_path, s00):
+    # 게시일과 마감일이 모두 없는 ID_NO_DATE에만 셋째 날짜 열의 값을 준다
+    _add_date_column(synth_data, "post_alt", {synth.ID_NO_DATE: dt.date(2025, 6, 1)})
+    synth_data["cfg"]["period"]["date_columns"] = ["post_start", "post_end", "post_alt"]
+    out = s00.scan(synth_data["cfg"], synth_data["root"], tmp_path / "s0")
+    base = pd.read_parquet(out["base"]).set_index("posting_id")
+    assert base.loc[synth.ID_NO_DATE, "date_source"] == "post_alt" and base.loc[synth.ID_NO_DATE, "month"] == 6
+
+
+def test_scan_names_a_missing_date_column_before_reading(synth_data, tmp_path, s00):
+    synth_data["cfg"]["period"]["date_columns"] = ["post_start", "post_end", "post_alt"]
+    with pytest.raises(KeyError, match=r"없는 열: \['post_alt'\]"):
+        s00.scan(synth_data["cfg"], synth_data["root"], tmp_path / "s0")
+    assert not (tmp_path / "s0").exists()      # 훑기 전에 멈춰 결과 폴더도 만들지 않는다
