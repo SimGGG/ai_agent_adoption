@@ -643,6 +643,8 @@ KIND_LABELS = {"dev": "개발", "use": "생성형 AI 활용"}
 OCC_STATUS = ("설정에만 있음", "자료에만 있음", "양쪽에 있음", "설정에서 뺀 중분류")
 # `t16_detail_by_arm`의 행 이름
 ARM_LABELS = {1: "처치 공고", 0: "비교 공고"}
+# `t03e`, `t04`, `t15`에서 처치 공고와 비교 공고의 행 앞에 두는, 대상 공고 모두의 행 이름
+ALL_LABEL = "전체"
 ARM_WITHIN_LABEL = "같은 세분류·연도 안의 차이"
 MISSING_LABEL = "결측"
 GIT_UNKNOWN = "알 수 없음(git으로 커밋을 확인하지 못함)"
@@ -986,27 +988,28 @@ def _t03a_skills_per_posting(base: pd.DataFrame) -> pd.DataFrame:
 
 
 def _sparse_filter_sample(alive: np.ndarray, treat: pd.DataFrame, pos: np.ndarray, skill_code: pd.Series,
-                          definition: str, cfg: dict) -> tuple[pd.DataFrame, np.ndarray, pd.Series]:
-    """희소 필터를 적용할 공고와 숙련을 정한다. `t03b_sparse_filter_grid`와 `time_outcome_model`이 함께 쓴다.
+                          cfg: dict) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
+    """희소 필터를 적용할 공고와 숙련을 정한다. `t03b_sparse_filter_grid`, `t13`, `t14`, `time_outcome_model`이 함께 쓴다.
 
-    대상 공고는 제외 규칙 네 단계를 통과한 공고(`alive`, base와 같은 길이)이다. `pos`와 `skill_code`는 숙련 긴 표의
-    행별 base 위치와 숙련 코드이다. 돌려주는 값은 대상 공고의 행만 남긴 숙련 표(열 `posting_id`는 base에서의 위치,
-    `skill_code`), 대상 공고의 base 위치, 대상 공고의 처치 정의 값(`select_arms`, 대상 공고와 같은 순서)이다.
+    대상 공고는 제외 규칙 네 단계를 통과한 공고(`alive`, base와 같은 길이) 가운데 설정의 처치 정의(`_arm`)로 처치
+    공고이거나 비교 공고인 공고이다(추정에 들어가는 공고. 어느 쪽도 아닌 공고는 뺀다). `pos`와 `skill_code`는 숙련 긴
+    표의 행별 base 위치와 숙련 코드이다. 돌려주는 값은 대상 공고의 행만 남긴 숙련 표(열 `posting_id`는 base에서의
+    위치, `skill_code`), 대상 공고의 base 위치, 대상 공고의 처치 여부(1 처치 공고, 0 비교 공고, 대상 공고와 같은 순서)이다.
     """
-    alive_idx = np.flatnonzero(alive)
-    arm = treatment.select_arms(treat.iloc[alive_idx], definition, _keyword_col(cfg))
-    keep = alive[pos]
+    arm_all = _arm(treat, alive, cfg)
+    member = arm_all >= 0
+    idx = np.flatnonzero(member)
+    keep = member[pos]
     lk = pd.DataFrame({"posting_id": pos[keep], "skill_code": skill_code[keep].reset_index(drop=True)})
-    return lk, alive_idx, arm
+    return lk, idx, arm_all[idx]
 
 
 def _t03b_sparse_filter_grid(long: pd.DataFrame, treat: pd.DataFrame, alive: np.ndarray,
                              agent_codes: set[str], cfg: dict) -> pd.DataFrame:
     outcome = skills.drop_codes(long[["pos", "skill_code"]], agent_codes)
-    lk, alive_idx, arm = _sparse_filter_sample(alive, treat, outcome["pos"].to_numpy(), outcome["skill_code"],
-                                               "use", cfg)
-    treated = set(alive_idx[(arm == 1).fillna(False).to_numpy(dtype=bool)].tolist())
-    n_postings = len(alive_idx)
+    lk, sample_idx, arm = _sparse_filter_sample(alive, treat, outcome["pos"].to_numpy(), outcome["skill_code"], cfg)
+    treated = set(sample_idx[arm == 1].tolist())
+    n_postings = len(sample_idx)
     sf = cfg["skills"]["sparse_filter"]
     rates = sorted(set(SPARSE_GRID_MIN_RATE) | {float(sf["min_rate"])})
     mins = sorted(set(SPARSE_GRID_MIN_TREATED) | {int(sf["min_treated"])})
@@ -1035,28 +1038,36 @@ def _t03c_skills_by_source_column(long: pd.DataFrame, codebook: pd.DataFrame) ->
     return pd.concat([out, total[out.columns]], ignore_index=True)
 
 
-def _t04_bzno_ked_by_treatment(base: pd.DataFrame, flags: pd.DataFrame) -> pd.DataFrame:
+def _arm_groups(scope: np.ndarray, arm: np.ndarray) -> list[tuple[str, np.ndarray]]:
+    """(행 이름, 공고 표시) 세 쌍: `전체`(`scope`의 모든 공고), `처치 공고`, `비교 공고`(`arm`, `_arm`의 값)."""
+    return [(ALL_LABEL, scope), (ARM_LABELS[1], scope & (arm == 1)), (ARM_LABELS[0], scope & (arm == 0))]
+
+
+def _t04_bzno_ked_by_treatment(base: pd.DataFrame, arm_base: np.ndarray) -> pd.DataFrame:
+    """base.parquet의 모든 공고를 `전체`, 설정의 처치 정의로 나눈 처치 공고, 비교 공고(`arm_base`)별로 보고, 사업자번호
+    보유 비율과 KED 결합 비율을 센다."""
     has_bzno = base["has_bzno"].to_numpy(dtype=bool)
-    df = pd.DataFrame({"has_use": flags["has_use"].to_numpy(dtype=bool), "has_bzno": has_bzno,
-                       "ked": base["ked_matched"].to_numpy(dtype=bool) & has_bzno})
-    g = df.groupby("has_use").agg(n=("has_bzno", "size"), n_has_bzno=("has_bzno", "sum"),
-                                  n_ked_matched=("ked", "sum"))
-    g = g.reindex([False, True], fill_value=0).astype("int64").rename_axis("has_use").reset_index()
+    ked = base["ked_matched"].to_numpy(dtype=bool) & has_bzno
+    rows = []
+    for label, member in _arm_groups(np.ones(len(base), dtype=bool), arm_base):
+        rows.append({"arm": label, "n": int(member.sum()), "n_has_bzno": int((member & has_bzno).sum()),
+                     "n_ked_matched": int((member & ked).sum())})
+    g = pd.DataFrame(rows)
     g["has_bzno_rate"] = _rate(g["n_has_bzno"], g["n"])
     g["ked_matched_rate"] = _rate(g["n_ked_matched"], g["n_has_bzno"])
-    return g[["has_use", "n", "n_has_bzno", "has_bzno_rate", "n_ked_matched", "ked_matched_rate"]]
+    return g[["arm", "n", "n_has_bzno", "has_bzno_rate", "n_ked_matched", "ked_matched_rate"]]
 
 
-def _t03e_no_outcome_skill(long: pd.DataFrame, flags: pd.DataFrame, alive: np.ndarray,
+def _t03e_no_outcome_skill(long: pd.DataFrame, arm: np.ndarray, alive: np.ndarray,
                            agent_codes: set[str]) -> pd.DataFrame:
-    """제외 규칙 네 단계를 통과한 공고 가운데, AI 에이전트 숙련코드를 빼면 숙련이 하나도 남지 않는 공고 수."""
+    """제외 규칙 네 단계를 통과한 공고 가운데, AI 에이전트 숙련코드를 빼면 숙련이 하나도 남지 않는 공고 수.
+    행은 `전체`와 설정의 처치 정의로 나눈 처치 공고, 비교 공고(`arm`, `_arm`)이다."""
     outcome = skills.drop_codes(long[["pos", "skill_code"]], agent_codes)
     has_outcome = np.zeros(len(alive), dtype=bool)
     has_outcome[outcome["pos"].to_numpy()] = True
     none_left = alive & ~has_outcome
     rows = []
-    for group in ("전체", "has_use", "has_dev", "treat_code"):
-        member = alive if group == "전체" else alive & flags[group].to_numpy(dtype=bool)
+    for group, member in _arm_groups(alive, arm):
         rows.append({"group": group, "n": int(member.sum()), "n_no_outcome_skill": int((member & none_left).sum())})
     out = pd.DataFrame(rows)
     out["no_outcome_skill_rate"] = _rate(out["n_no_outcome_skill"], out["n"])
@@ -1070,17 +1081,21 @@ def _t04b_ked_lines(ked_firm: pd.DataFrame) -> pd.DataFrame:
                          "n_firms": [len(ked_firm)]})
 
 
-def _t05_source(base: pd.DataFrame, flags: pd.DataFrame) -> pd.DataFrame:
+def _t05_source(base: pd.DataFrame, flags: pd.DataFrame, arm_base: np.ndarray) -> pd.DataFrame:
+    """연도 × 수집 사이트별 공고 수와 비율. `treated_rate`는 설정의 처치 정의로 나눈 처치 공고(`arm_base`)의 비율이다."""
     df = pd.DataFrame({"year": base["year"].to_numpy(), "source": base["source"].astype("string").fillna(MISSING_LABEL),
-                       "use": flags["has_use"].to_numpy(dtype=bool), "skill": base["n_skills"].to_numpy() > 0})
-    g = df.groupby(["year", "source"]).agg(n=("use", "size"), n_use=("use", "sum"), n_skill=("skill", "sum"))
+                       "use": flags["has_use"].to_numpy(dtype=bool), "treated": arm_base == 1,
+                       "skill": base["n_skills"].to_numpy() > 0})
+    g = df.groupby(["year", "source"]).agg(n=("use", "size"), n_use=("use", "sum"), n_treated=("treated", "sum"),
+                                           n_skill=("skill", "sum"))
     g = g.reset_index()
     g["share_in_year"] = _rate(g["n"], g.groupby("year")["n"].transform("sum"))
+    g["treated_rate"] = _rate(g["n_treated"], g["n"])
     g["has_use_rate"] = _rate(g["n_use"], g["n"])
     g["has_skill_rate"] = _rate(g["n_skill"], g["n"])
     # 연도 안에서는 공고가 많은 사이트부터 싣는다(보고서에서 행이 잘려도 큰 사이트가 남게 하기 위해서다)
     g = g.sort_values(["year", "n", "source"], ascending=[True, False, True], ignore_index=True)
-    return g[["year", "source", "n", "share_in_year", "has_use_rate", "has_skill_rate"]]
+    return g[["year", "source", "n", "share_in_year", "treated_rate", "has_use_rate", "has_skill_rate"]]
 
 
 def _t06a_overlap(base: pd.DataFrame, flags: pd.DataFrame) -> pd.DataFrame:
@@ -1135,10 +1150,12 @@ def _t08_last_year_monthly(base: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     return g[["year", "month", "n", "n_has_skill", "has_skill_rate"]]
 
 
-def _t09a_by_ksic_sub(base: pd.DataFrame, flags: pd.DataFrame) -> pd.DataFrame:
+def _t09a_by_ksic_sub(base: pd.DataFrame, flags: pd.DataFrame, arm_base: np.ndarray) -> pd.DataFrame:
+    """산업 소분류별 공고 수, 생성형 AI 활용 숙련 공고 수, 설정의 처치 정의로 나눈 처치 공고 수(`arm_base`)."""
     df = pd.DataFrame({"ksic_sub": base["ksic_sub"].astype("string").fillna(MISSING_LABEL),
-                       "use": flags["has_use"].to_numpy(dtype=bool)})
-    g = df.groupby("ksic_sub").agg(n=("use", "size"), n_has_use=("use", "sum")).astype("int64").reset_index()
+                       "use": flags["has_use"].to_numpy(dtype=bool), "treated": arm_base == 1})
+    g = (df.groupby("ksic_sub").agg(n=("use", "size"), n_has_use=("use", "sum"), n_treated=("treated", "sum"))
+         .astype("int64").reset_index())
     return g.sort_values(["n", "ksic_sub"], ascending=[False, True], ignore_index=True)
 
 
@@ -1260,14 +1277,13 @@ def _skill_counts(outcome: pd.DataFrame, treat: pd.DataFrame, alive: np.ndarray,
     """제외 규칙 네 단계를 적용한 공고에서 숙련마다 공고 수를 센다. `outcome`은 AI 에이전트 숙련코드를 뺀 숙련 긴 표
     (열 `pos`, `skill_code`)이다.
 
-    대상 공고와 처치 공고(생성형 AI 활용 처치 정의의 처치 공고)는 `t03b_sparse_filter_grid`와 같다
+    대상 공고(설정의 처치 정의로 처치 공고이거나 비교 공고인 공고)와 처치 공고는 `t03b_sparse_filter_grid`와 같다
     (`_sparse_filter_sample`). 돌려주는 값: 숙련 코드를 번호로 한 표(열 `n`, `n_treated`), 대상 공고 수, 처치 공고 수,
     설정의 희소 필터(`skills.sparse_filter`)를 통과한 숙련 코드의 집합.
     """
-    lk, alive_idx, arm = _sparse_filter_sample(alive, treat, outcome["pos"].to_numpy(), outcome["skill_code"],
-                                               "use", cfg)
-    treated = set(alive_idx[(arm == 1).fillna(False).to_numpy(dtype=bool)].tolist())
-    n_postings = len(alive_idx)
+    lk, sample_idx, arm = _sparse_filter_sample(alive, treat, outcome["pos"].to_numpy(), outcome["skill_code"], cfg)
+    treated = set(sample_idx[arm == 1].tolist())
+    n_postings = len(sample_idx)
     count = lambda d: d.groupby("skill_code", observed=True)["posting_id"].nunique()
     counts = pd.DataFrame({"n": count(lk), "n_treated": count(lk[lk["posting_id"].isin(treated)])})
     counts = counts.fillna(0).astype("int64")
@@ -1280,8 +1296,8 @@ def _skill_counts(outcome: pd.DataFrame, treat: pd.DataFrame, alive: np.ndarray,
 def _t13_adjacent_candidates(codebook: pd.DataFrame, counts: pd.DataFrame, n_postings: int, n_treated: int,
                              kept: set[str], agent_codes: set[str], cfg: dict) -> pd.DataFrame:
     """인접 숙련 후보: 숙련 설명 파일에서 세부 분류가 `skills.adjacent_candidate_details`에 든 숙련 가운데 AI 에이전트
-    숙련코드가 아닌 것마다 한 행. 공고 수는 제외 규칙 네 단계를 적용한 공고에서 센 것(`_skill_counts`)이고,
-    공고가 없는 후보도 0으로 싣는다. 공고가 많은 순."""
+    숙련코드가 아닌 것마다 한 행. 공고 수는 제외 규칙 네 단계를 적용한 공고 가운데 설정의 처치 정의로 처치 공고이거나
+    비교 공고인 공고에서 센 것(`_skill_counts`)이고, 공고가 없는 후보도 0으로 싣는다. 공고가 많은 순."""
     cand = _candidate_rows(codebook, "detail", list(cfg["skills"]["adjacent_candidate_details"]),
                            "skills.adjacent_candidate_details")
     cand = cand[~cand["skill_code"].isin(agent_codes)]
@@ -1297,7 +1313,7 @@ def _t13_adjacent_candidates(codebook: pd.DataFrame, counts: pd.DataFrame, n_pos
 
 def _t14_placebo_candidates(codebook: pd.DataFrame, counts: pd.DataFrame, n_postings: int, kept: set[str],
                             cfg: dict) -> pd.DataFrame:
-    """placebo 숙련 후보: 제외 규칙 네 단계를 적용한 공고에서 설정의 희소 필터를 통과한 숙련(`_skill_counts`,
+    """placebo 숙련 후보: 제외 규칙 네 단계를 적용한 공고 가운데 처치 공고와 비교 공고에서 설정의 희소 필터를 통과한 숙련(`_skill_counts`,
     `t03b_sparse_filter_grid`와 같은 공고와 같은 처치 공고) 가운데 대분류가 `skills.placebo_candidate_domains`에
     든 것마다 한 행. 처치 공고와 비교 공고의 출현율은 싣지 않는다. 공고가 많은 순."""
     cand = _candidate_rows(codebook, "domain", list(cfg["skills"]["placebo_candidate_domains"]),
@@ -1321,9 +1337,10 @@ def _missing_external(cfg: dict, root: Path) -> list[str]:
     return out
 
 
-def _t15_aiie_coverage(base: pd.DataFrame, flags: pd.DataFrame, alive: np.ndarray, cfg: dict, root: Path,
+def _t15_aiie_coverage(base: pd.DataFrame, arm: np.ndarray, alive: np.ndarray, cfg: dict, root: Path,
                        ksic_valid: set[str]) -> pd.DataFrame:
-    """제외 규칙 네 단계를 적용한 공고에 산업 소분류별 AIIE가 붙는 비율과 값의 분위수(전체, `has_use` 1과 0).
+    """제외 규칙 네 단계를 적용한 공고에 산업 소분류별 AIIE가 붙는 비율과 값의 분위수(`전체`와, 설정의 처치 정의로
+    나눈 처치 공고, 비교 공고. `arm`은 `_arm`의 값).
 
     외부 자료가 없으면 빈 표를 돌려주고 attrs[MISSING_EXTERNAL_ATTR]에 없는 파일의 목록을 둔다. 값이 붙은 소분류 수와
     산업분류표의 소분류 수는 attrs의 `n_sub_with_aiie`, `n_sub_total`에 둔다(보고서의 설명에 쓴다).
@@ -1345,12 +1362,11 @@ def _t15_aiie_coverage(base: pd.DataFrame, flags: pd.DataFrame, alive: np.ndarra
     aiie = confounders.load_aiie(root / d["aiie"], set(naics_isic["naics6"].str[:4]))
     table = confounders.aiie_by_ksic_sub(aiie, naics_isic, confounders.load_ksic_isic(root / d["ksic_isic"]))
     value = confounders.attach_aiie(base["ksic_sub"], table).to_numpy()
-    has_use = flags["has_use"].to_numpy(dtype=bool)
     rows = []
-    for label, mask in (("전체", alive), ("1", alive & has_use), ("0", alive & ~has_use)):
+    for label, mask in _arm_groups(alive, arm):
         v = pd.Series(value[mask]).dropna()
         n = int(mask.sum())
-        row = {"has_use": label, "n": n, "n_with_aiie": len(v), "with_aiie_rate": len(v) / n if n else np.nan}
+        row = {"arm": label, "n": n, "n_with_aiie": len(v), "with_aiie_rate": len(v) / n if n else np.nan}
         row.update({k: float(v.quantile(q)) if len(v) else np.nan for k, q in AIIE_QUANTILES.items()})
         rows.append(row)
     out = pd.DataFrame(rows).astype({"n": "int64", "n_with_aiie": "int64"})
@@ -1488,9 +1504,11 @@ def build_tables(cfg: dict, root: Path, s0_dir: Path) -> dict[str, pd.DataFrame]
 
     alive, counts = _exclusions(base, cfg)
     arm = _arm(treat, alive, cfg)
+    # 사업자번호와 숙련 제외 전의 base.parquet 모든 공고를 설정의 처치 정의로 나눈 값(t04, t05, t09a)
+    arm_base = _arm(treat, np.ones(len(base), dtype=bool), cfg)
     years = sorted({int(y) for y in cfg["data"]["years"]} | {int(y) for y in base["year"].unique()})
     outcome = skills.drop_codes(long[["pos", "skill_code"]], agent_codes)   # 결과변수로 쓰는 숙련만 남긴 긴 표
-    skill_counts, n_alive, n_use_treated, kept = _skill_counts(outcome, treat, alive, cfg)
+    skill_counts, n_sample, n_sample_treated, kept = _skill_counts(outcome, treat, alive, cfg)
 
     tables = {
         "t01_exclusions": _t01_exclusions(stats, counts, cfg),
@@ -1512,25 +1530,25 @@ def build_tables(cfg: dict, root: Path, s0_dir: Path) -> dict[str, pd.DataFrame]
         "t03b_sparse_filter_grid": _t03b_sparse_filter_grid(long, treat, alive, agent_codes, cfg),
         "t03c_skills_by_source_column": _t03c_skills_by_source_column(long, codebook),
         "t03d_match_stats": stats[["year", "n_tokens", "n_unmatched", "n_length_mismatch_rows"]].copy(),
-        "t03e_no_outcome_skill": _t03e_no_outcome_skill(long, flags, alive, agent_codes),
-        "t04_bzno_ked_by_treatment": _t04_bzno_ked_by_treatment(base, flags),
+        "t03e_no_outcome_skill": _t03e_no_outcome_skill(long, arm, alive, agent_codes),
+        "t04_bzno_ked_by_treatment": _t04_bzno_ked_by_treatment(base, arm_base),
         "t04b_ked_lines": ked_lines,
-        "t05_source": _t05_source(base, flags),
+        "t05_source": _t05_source(base, flags, arm_base),
         "t06a_overlap": _t06a_overlap(base, flags),
         "t06b_agent_skill_by_year": _t06b_agent_skill_by_year(long, base, codebook, codes, years),
         "t06c_keyword_pattern_hits": _t06c_keyword_pattern_hits(kw, cfg),
         "t08_2026_monthly": _t08_last_year_monthly(base, cfg),
-        "t09a_by_ksic_sub": _t09a_by_ksic_sub(base, flags),
+        "t09a_by_ksic_sub": _t09a_by_ksic_sub(base, flags, arm_base),
         "t09b_ksic_not_in_table": _t09b_ksic_not_in_table(base, ksic_valid),
         "t10a_use_by_occ_year": _t10a_use_by_occ_year(base, flags, alive, keco, cfg, years),
         "t10b_occ_list_check": _t10b_occ_list_check(occ, cfg),
         "t11_salary": _t11_salary(base),
         "t12_sido_other": _t12_sido_other(base),
         "t12b_sido_other_words": _t12b_sido_other_words(other_words),
-        "t13_adjacent_candidates": _t13_adjacent_candidates(codebook, skill_counts, n_alive, n_use_treated, kept,
+        "t13_adjacent_candidates": _t13_adjacent_candidates(codebook, skill_counts, n_sample, n_sample_treated, kept,
                                                             agent_codes, cfg),
-        "t14_placebo_candidates": _t14_placebo_candidates(codebook, skill_counts, n_alive, kept, cfg),
-        "t15_aiie_coverage": _t15_aiie_coverage(base, flags, alive, cfg, root, ksic_valid),
+        "t14_placebo_candidates": _t14_placebo_candidates(codebook, skill_counts, n_sample, kept, cfg),
+        "t15_aiie_coverage": _t15_aiie_coverage(base, arm, alive, cfg, root, ksic_valid),
         "t16_detail_by_arm": _t16_detail_by_arm(base, outcome, arm),
         "t17_firm_treated": _t17_firm_treated(base, arm),
         "t18_first_treated_firms": _t18_first_treated_firms(base, arm),
@@ -1597,10 +1615,9 @@ def time_outcome_model(base: pd.DataFrame, treat: pd.DataFrame, long: pd.DataFra
     # 숙련 긴 표는 공고 번호 대신 base에서의 위치로 다루고, 제외 규칙을 통과한 공고의 행만 남긴다.
     # 희소 필터의 대상은 t03b_sparse_filter_grid와 같은 함수로 정한다.
     pos = _positions(long["posting_id"], base["posting_id"])
-    lk, alive_idx, arm = _sparse_filter_sample(alive, treat, pos, long["skill_code"],
-                                               cfg["treatment"]["definition"], cfg)
-    is_treated = (arm == 1).fillna(False).to_numpy(dtype=bool)
-    is_comparison = (arm == 0).fillna(False).to_numpy(dtype=bool)
+    lk, alive_idx, arm = _sparse_filter_sample(alive, treat, pos, long["skill_code"], cfg)
+    is_treated = arm == 1
+    is_comparison = arm == 0
     if lk.empty:
         return out
     kept_codes = skills.sparse_filter(lk, set(alive_idx[is_treated].tolist()), len(alive_idx),
@@ -1658,9 +1675,8 @@ REPORT_SECTIONS = [
         "숙련명으로 최종판 코드를 찾지 못한 숙련 수",
      ["t03a_skills_per_posting", "t03b_sparse_filter_grid", "t03c_skills_by_source_column", "t03d_match_stats",
       "t03e_no_outcome_skill"]),
-    (4, "생성형 AI 활용 숙련 보유 여부별 사업자번호 보유 비율과 KED 결합 비율",
-     ["t04_bzno_ked_by_treatment", "t04b_ked_lines"]),
-    (5, "연도별 수집 사이트 구성, 사이트별 생성형 AI 활용 숙련 공고 비율과 숙련 보유 비율", ["t05_source"]),
+    (4, "처치 여부별 사업자번호 보유 비율과 KED 결합 비율", ["t04_bzno_ked_by_treatment", "t04b_ked_lines"]),
+    (5, "연도별 수집 사이트 구성, 사이트별 처치 공고 비율과 숙련 보유 비율", ["t05_source"]),
     (6, "키워드 처치와 숙련코드 처치의 겹침, 두 처치와 `ai_peripheral`의 겹침, 생성형 AI 활용 키워드 사전에 걸린 "
         "공고(`kw_use`)와 두 종류의 숙련코드 처치의 겹침, AI 에이전트 숙련코드 54개 각각의 기간별 공고 수, 키워드 "
         "표현별 공고 수",
@@ -1745,6 +1761,11 @@ DEFINITION_TEXT = {
                "걸린 공고를 처치 공고로 본다.",
 }
 assert set(DEFINITION_TEXT) == set(treatment.DEFINITIONS)
+def _arm_note(cfg: dict) -> str:
+    """처치 공고와 비교 공고를 나누는 표의 설명에 넣는 한 문장. 설정의 처치 정의 값을 적는다."""
+    return f"처치 공고와 비교 공고는 설정의 처치 정의(`treatment.definition` = `{cfg['treatment']['definition']}`)를 따른다."
+
+
 _COMPARISON_TEXT = ("비교 공고는 어떤 처치 정의에서도 같다: 본문이 AI 에이전트 키워드 사전(`treatment.keyword_dictionary`로 "
                     "고른 사전)과 생성형 AI 활용 키워드 사전에 모두 걸리지 않고 AI 에이전트 숙련코드도 없는 공고이다.")
 _TREAT_ALL_NOTE =("`treat_all`은 숙련코드 처치(`treat_code`)와 엄격한 사전의 키워드 처치(`kw_strict`)를 합친 것이며, "
@@ -1785,8 +1806,10 @@ def _table_notes(cfg: dict) -> dict[str, str]:
     gap_rule = (f"설정 `period.fill.max_gap_days` = {max_gap}이어서, `step` = `fill_gap` 행은 " + _BASE_NOTE + " 가운데 "
                 "날짜를 받았지만 앞뒤 날짜의 간격이 이 일수보다 크거나 뒤에 날짜 있는 공고가 없어 분석 기간 단계에서 빠진 "
                 "공고를 센다(`year`는 받은 날짜의 연도). " if max_gap is not None else "")
-    has_use_note = ("`has_use`는 생성형 AI 활용 숙련(숙련코드)이 있는지만 본 표시이다. 설정의 처치 정의(" + definition
-                    + ")로 나눈 처치 공고의 기간별 수는 `t02a_treated_by_period`의 `n_treated`에 있다.")
+    arm_note = _arm_note(cfg)
+    # 사업자번호와 숙련 제외 전의 공고(base.parquet)를 처치 정의로 나눈 표(t04, t05, t09a)의 설명
+    base_arm_note = (arm_note + " 이 표는 사업자번호와 숙련 제외 전의 공고에 처치 정의를 적용했으므로, 사업자번호가 "
+                     "없는 처치 공고도 센다.")
     return {
         "t01_exclusions": (
             "`in_period`, `in_occ` 두 단계는 `scan_stats.parquet`(공고 파일의 모든 공고)에서 왔고 `year`는 공고 파일의 "
@@ -1877,13 +1900,10 @@ def _table_notes(cfg: dict) -> dict[str, str]:
             "대상: " + _BASE_NOTE + " 가운데 숙련이 하나 이상 있는 공고. 공고당 숙련 수는 `skills_long.parquet`의 "
             "공고별 행 수이다."),
         "t03b_sparse_filter_grid": (
-            "대상: " + _ALIVE_NOTE + "(7절의 학습 시간 측정에서 희소 필터를 적용하는 공고와 같다). 처치 공고는 이 공고 "
-            "가운데 숙련코드만으로 정한 처치 정의 `use`의 처치 공고(`select_arms(…, \"use\") == 1`, 생성형 AI 활용 숙련이 "
-            "있는 공고)이다. 이 표는 설정의 처치 정의(" + definition + ")와 관계없이 이 정의를 쓴다"
-            + ("." if cfg["treatment"]["definition"] == "use" else
-               "(설정의 처치 정의와 다르므로, 설정의 처치 정의로 센 처치 공고 수는 `t02a_treated_by_period`의 "
-               "`n_treated`에 있다).") + " "
-            "AI 에이전트 숙련코드는 세기 전에 뺐다. `n_postings`는 출현율의 분모, `n_treated`는 처치 공고 수이다. "
+            "대상: " + _ALIVE_NOTE + " 가운데 처치 공고이거나 비교 공고인 공고(추정에 들어가는 공고이며, 7절의 학습 "
+            "시간 측정에서 희소 필터를 적용하는 공고와 같다). " + arm_note + " 어느 쪽도 아닌 공고는 뺐다. "
+            "AI 에이전트 숙련코드는 세기 전에 뺐다. `n_postings`는 출현율의 분모(처치 공고와 비교 공고의 수), "
+            "`n_treated`는 처치 공고 수이다. "
             f"설정의 기준은 `min_rate` {cfg['skills']['sparse_filter']['min_rate']}, "
             f"`min_treated` {cfg['skills']['sparse_filter']['min_treated']}이다."),
         "t03c_skills_by_source_column": (
@@ -1896,13 +1916,14 @@ def _table_notes(cfg: dict) -> dict[str, str]:
             "코드를 찾지 못한 코드 수, `n_length_mismatch_rows`는 한 숙련 열에서 코드 칸과 숙련명 칸을 `|`로 나눈 "
             "조각 수(빈 조각 포함)가 다른 공고 × 열의 수이다."),
         "t03e_no_outcome_skill": (
-            "대상: " + _ALIVE_NOTE + ". `전체`는 이 공고 모두이고, `has_use`, `has_dev`, `treat_code`는 그 가운데 해당 "
-            "표시가 참인 공고이다. `n_no_outcome_skill`은 숙련이 있어 숙련 없음 단계를 통과했지만, 결과변수에서 빼는 "
+            "대상: " + _ALIVE_NOTE + ". `전체`는 이 공고 모두이고, `처치 공고`와 `비교 공고`는 그 가운데 처치 정의로 "
+            "나눈 공고이다. " + arm_note + " 어느 쪽도 아닌 공고는 `전체`에만 든다. `n_no_outcome_skill`은 숙련이 있어 숙련 없음 단계를 통과했지만, 결과변수에서 빼는 "
             "AI 에이전트 숙련코드 54개를 빼면 숙련이 하나도 남지 않는 공고 수이고, `no_outcome_skill_rate`는 "
             "`n_no_outcome_skill / n`이다. 이 공고들은 지금 설정에서는 분석에 남아, 모든 숙련의 결과변수가 0인 공고가 "
             "된다. 이 공고를 분석에 남길지는 저자가 정한다(`docs/decisions.md` 6.7-17)."),
         "t04_bzno_ked_by_treatment": (
-            "대상: " + _BASE_NOTE + ". " + has_use_note + " `ked_matched_rate`의 분모는 "
+            "대상: " + _BASE_NOTE + ". `전체`는 이 공고 모두이고, `처치 공고`와 `비교 공고`는 그 가운데 처치 정의로 "
+            "나눈 공고이다(어느 쪽도 아닌 공고는 `전체`에만 든다). " + base_arm_note + " `ked_matched_rate`의 분모는 "
             "사업자번호가 있는 공고 수(`n_has_bzno`)이다."),
         "t04b_ked_lines": (
             "KED 기업 자료 파일의 전체 줄 수, 구분자 수가 맞지 않거나 줄 안에 캐리지 리턴 문자가 있어 버린 줄 수, "
@@ -1912,7 +1933,8 @@ def _table_notes(cfg: dict) -> dict[str, str]:
             "줄이 있다는 뜻이다."),
         "t05_source": (
             "대상: " + _BASE_NOTE + ". " + post_year + " `share_in_year`는 그 연도 공고 가운데 그 사이트 공고의 "
-            "비율이고, `has_use_rate`는 그 사이트 공고 가운데 생성형 AI 활용 숙련이 있는 공고의 비율이다. " + has_use_note),
+            "비율이다. `treated_rate`는 그 사이트 공고 가운데 처치 공고의 비율이고, `has_use_rate`는 그 사이트 공고 "
+            "가운데 생성형 AI 활용 숙련(숙련코드)이 있는 공고의 비율이다. " + base_arm_note),
         "t06a_overlap": ("대상: " + _BASE_NOTE + ". 값 `1`은 참, `0`은 거짓, `결측`은 값이 없는 공고이다. 세 번째 "
                          "교차표는 생성형 AI 활용 키워드 사전에 걸린 공고(`kw_use`)와 두 종류의 AI 에이전트 숙련코드 "
                          "처치(`has_use`, `has_dev`)의 교차표이다."),
@@ -1929,8 +1951,8 @@ def _table_notes(cfg: dict) -> dict[str, str]:
             + ("지금 설정(`industry.not_in_table` = `missing`)에서는 소분류표에 없는 코드의 공고도 `결측`에 든다"
                "(그 건수는 `t09b_ksic_not_in_table`에 있다). " if ksic_missing else
                f"`{classif.KSIC_NOT_IN_TABLE}`은 소분류표에 없는 코드의 공고이다. ")
-            + "`n_has_use`는 생성형 AI 활용 숙련(숙련코드)이 있는 공고 수이다. 직종 세분류별 건수는 2절의 "
-            "`t02b_treated_by_occ`에 있다."),
+            + "`n_has_use`는 생성형 AI 활용 숙련(숙련코드)이 있는 공고 수이고, `n_treated`는 처치 공고 수이다. "
+            + base_arm_note + " 직종 세분류별 건수는 2절의 `t02b_treated_by_occ`에 있다."),
         "t09b_ksic_not_in_table": (
             "대상: " + _BASE_NOTE + " 가운데 5자리로 맞춘 산업 코드(`ksic5`)가 있고 그 앞 3자리가 소분류표에 없는 공고. "
             f"`ksic5`별 공고 수, 많은 순으로 최대 {KSIC_NOT_IN_TABLE_TOP}개. 지금 설정(`industry.not_in_table` = "
@@ -1962,27 +1984,27 @@ def _table_notes(cfg: dict) -> dict[str, str]:
             "공백, `>`, `&` 앞까지, 끝의 `전지역`과 `전체`를 뗀 것, 20자까지)별 공고 수를 많은 순으로 싣는다. "
             f"CSV에는 많은 순으로 최대 {SIDO_OTHER_WORDS_TOP}개가 있다."),
         "t13_adjacent_candidates": (
-            "대상: " + _ALIVE_NOTE + ". 숙련 설명 파일에서 세부 분류(`detail`)가 `skills.adjacent_candidate_details`에 "
-            "든 숙련 가운데 AI 에이전트 숙련코드가 아닌 것마다 한 행이며, 공고가 없는 후보도 싣는다. `n`은 그 숙련이 있는 "
-            "공고 수, `rate`는 `n`을 대상 공고 수로 나눈 값이다. `n_treated`는 숙련코드만으로 정한 처치 정의 `use`의 "
-            "처치 공고(`t03b_sparse_filter_grid`와 같다. 설정의 처치 정의와 관계없다) 가운데 그 숙련이 있는 공고 수, "
-            "`treated_rate`는 `n_treated`를 처치 공고 "
-            "수로 나눈 값이다. `passes_sparse_filter`는 설정의 희소 필터(" + sf_text + ")를 통과하는지이다. 공고가 많은 "
+            "대상: " + _ALIVE_NOTE + " 가운데 처치 공고이거나 비교 공고인 공고(`t03b_sparse_filter_grid`와 같다. 어느 "
+            "쪽도 아닌 공고는 뺐다). " + arm_note + " 숙련 설명 파일에서 세부 분류(`detail`)가 "
+            "`skills.adjacent_candidate_details`에 든 숙련 가운데 AI 에이전트 숙련코드가 아닌 것마다 한 행이며, 공고가 "
+            "없는 후보도 싣는다. `n`은 그 숙련이 있는 공고 수, `rate`는 `n`을 대상 공고 수로 나눈 값이다. `n_treated`는 "
+            "처치 공고 가운데 그 숙련이 있는 공고 수, `treated_rate`는 `n_treated`를 처치 공고 수로 나눈 값이다. `passes_sparse_filter`는 설정의 희소 필터(" + sf_text + ")를 통과하는지이다. 공고가 많은 "
             "순으로 모든 후보를 싣는다."),
         "t14_placebo_candidates": (
-            "대상: " + _ALIVE_NOTE + ". 설정의 희소 필터(" + sf_text + ")를 통과한 숙련(3절 `t03b_sparse_filter_grid`와 "
-            "같은 공고와 같은 처치 공고로 정한다. AI 에이전트 숙련코드는 뺐다) 가운데 대분류(`domain`)가 "
+            "대상: " + _ALIVE_NOTE + " 가운데 처치 공고이거나 비교 공고인 공고(3절 `t03b_sparse_filter_grid`와 같다. "
+            "어느 쪽도 아닌 공고는 뺐다). " + arm_note + " 설정의 희소 필터(" + sf_text + ")를 통과한 숙련(AI 에이전트 "
+            "숙련코드는 뺐다) 가운데 대분류(`domain`)가 "
             "`skills.placebo_candidate_domains`에 든 숙련마다 한 행이다. `sub`는 중분류, `n`은 그 숙련이 있는 공고 수, "
             "`rate`는 `n`을 대상 공고 수로 나눈 값이며, 공고가 많은 순으로 모두 싣는다. placebo 숙련은 생성형 AI 활용과 "
             "관계가 없어야 하는 숙련이며, 이 숙련에서 효과가 0으로 나오는지를 보아 분석 방법에 문제가 없는지 점검하는 데 "
             "쓴다(`proposal.md` 7장 2번). 이 표에 처치 공고와 비교 공고의 출현율을 싣지 않는 것은, placebo 숙련은 추정 "
             "결과를 보기 전에 골라야 하는데 두 집단의 출현율 차이는 추정 결과와 같은 방향의 정보이기 때문이다."),
         "t15_aiie_coverage": (
-            "대상: " + _ALIVE_NOTE + ". `has_use` = 전체는 이 공고 모두이고, `1`과 `0`은 그 가운데 생성형 AI 활용 숙련이 "
-            "있는 공고와 없는 공고이다. `n_with_aiie`는 산업 소분류(`ksic_sub`)에 AIIE 값이 붙은 공고 수, "
+            "대상: " + _ALIVE_NOTE + ". `arm` = `전체`는 이 공고 모두이고, `처치 공고`와 `비교 공고`는 그 가운데 처치 "
+            "정의로 나눈 공고이다(어느 쪽도 아닌 공고는 `전체`에만 든다). " + arm_note + " `n_with_aiie`는 산업 소분류(`ksic_sub`)에 AIIE 값이 붙은 공고 수, "
             "`with_aiie_rate`는 `n_with_aiie / n`이다. 산업코드가 없거나 소분류표에 없는 공고(`ksic_sub` 결측)와, 소분류에 "
             "이어진 산업에 AIIE 값이 없는 공고는 값이 붙지 않은 쪽에 센다. `p10`, `p25`, `p50`, `p75`, `p90`은 값이 "
-            "붙은 공고의 AIIE 값의 10, 25, 50, 75, 90% 분위수이다(공고마다 한 번씩 센다). " + has_use_note),
+            "붙은 공고의 AIIE 값의 10, 25, 50, 75, 90% 분위수이다(공고마다 한 번씩 센다)."),
         "t16_detail_by_arm": (
             "대상: " + _ALIVE_NOTE + "를 설정의 처치 정의(" + definition + ")로 나눈 처치 공고와 비교 공고(어느 쪽도 "
             "아닌 공고는 뺐다). " + post_year + " 숙련 수는 공고의 숙련 가운데 AI 에이전트 숙련코드를 뺀 숙련의 수이고, "
@@ -2108,9 +2130,9 @@ def _timing_block(timing: dict, cfg: dict) -> list[str]:
         "비교 공고인 공고. 기업(`bzno`)으로 나눈 폴드 " + str(est["n_folds"]) + "개 가운데 첫 번째 폴드를 뺀 나머지(학습 "
         "쪽)의 비교 공고만으로 LightGBM 분류 모형을 한 번 학습했다. 설정: `" + str(est["lgbm"]) + "`, 난수 "
         + str(est["seed"]) + ". "
-        "`n_skills_kept`는 이 공고와 설정의 처치 정의로 정한 처치 공고에 `config.yaml`의 희소 필터 기준"
-        "(`skills.sparse_filter`)을 적용해 남은 숙련 수이다. 3절 `t03b_sparse_filter_grid`는 같은 공고에 숙련코드만으로 "
-        "정한 처치 정의 `use`를 쓰므로, 설정의 처치 정의가 `use`일 때만 그 표의 같은 기준 행의 `n_skills_kept`와 같다.",
+        + _arm_note(cfg) + " "
+        "`n_skills_kept`는 3절 `t03b_sparse_filter_grid`에서 `config.yaml`의 기준(`skills.sparse_filter`)에 해당하는 "
+        "행의 `n_skills_kept`와 같다(두 곳이 같은 공고와 같은 처치 공고를 쓴다).",
         "",
         _md_table(rows),
         "",

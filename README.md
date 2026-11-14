@@ -108,6 +108,8 @@ PYTHONNOUSERSITE=1 PYTHONUTF8=1 "$(conda info --base)/envs/aabundle/python.exe" 
 
 게시일은 `post_start`이고, 없으면 `post_end`를 쓴다. 두 날짜가 모두 없는 공고는 같은 연도 파일에서 행 순서로 가장 가까운 앞 공고의 날짜를 받는다(`period.fill.enabled`, 결정 38). `scan`은 이를 위해 연도 파일마다 날짜 열만 파일 전체에서 먼저 읽는다. 날짜를 받은 공고는 `base`의 `date_source`가 `fill`이고, 바로 앞과 바로 뒤의 날짜 있는 공고 사이의 일수가 `fill_gap_days`에 있다. `date_fill`은 날짜를 받은 공고를 파일 연도 × 수집 사이트 × 그 일수의 구간별로 센 표이며, 보고서의 `t01d_date_fill`과 `t02e_fill_gap_by_period`(날짜를 받은 공고의 기간 × 구간별 수)가 이 내용을 싣는다. `period.fill.enabled`가 false이면 두 표는 만들지 않는다.
 
+보고서에서 처치 공고와 비교 공고를 나누는 표(기간별·직종군별 처치 공고 수, 희소 필터, 사업자번호와 KED 결합 비율, 수집 사이트와 산업 소분류별 처치 공고, 인접 숙련과 placebo 숙련 후보, 산업별 AI 노출 지수, 처치 여부별 숙련 수와 기업별 집계)는 모두 설정의 처치 정의(`treatment.definition`, 기본값 `use_any`)를 따른다. 희소 필터는 처치 공고와 비교 공고만으로 센다. 처치 정의는 `report`만 다시 실행하면 바뀐다.
+
 두 명령 모두 일을 시작하기 전에 `config.yaml`의 값이 쓸 수 있는 형태인지 확인한다(`aabundle/validate.py`). 예를 들어 `occupations.keco4`의 코드를 따옴표 없이 적으면 멈춘다.
 
 `config.yaml`을 고친 뒤 다시 실행할 명령은 고친 항목에 따라 다르다.
@@ -145,7 +147,7 @@ curl -sL -o data/external/census/2017_NAICS_to_ISIC_4.xlsx "https://www.census.g
 3. NAICS 6자리의 앞 4자리 → AIIE. AIIE 파일의 3자리 수준 항목(예: `531000`)은 연계표의 같은 3자리 아래 4자리 산업 모두에, 여러 산업을 묶은 항목(예: `3250A1`)은 설명에 적힌 4자리 산업 모두에 값을 준다.
 4. 소분류에 이어진 서로 다른 NAICS 4자리 산업 가운데 AIIE 값이 있는 산업의 값을 단순 평균한다. 이어진 산업에 값이 하나도 없는 소분류는 값이 없다(결측).
 
-자료 점검 보고서의 13절(`t15_aiie_coverage`)이 이 값이 붙은 공고의 비율과 값의 분포를 보인다. 세 파일 가운데 하나라도 없으면 이 표만 만들지 않고, 보고서의 13절에 없는 파일을 적는다.
+자료 점검 보고서의 13절(`t15_aiie_coverage`)이 이 값이 붙은 공고의 비율과 값의 분포를 전체, 처치 공고, 비교 공고(설정의 처치 정의 `treatment.definition`으로 나눈 것)별로 보인다. 세 파일 가운데 하나라도 없으면 이 표만 만들지 않고, 보고서의 13절에 없는 파일을 적는다.
 
 ## 실행 순서
 

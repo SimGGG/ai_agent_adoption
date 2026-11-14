@@ -144,8 +144,10 @@ def test_report_numbers_keep_small_rates_and_csv_keeps_full_precision(synth_data
     csv = pd.read_csv(tmp_path / "s0" / "tables" / "t04_bzno_ked_by_treatment.csv", encoding="utf-8-sig")
     # 과제 3: KED와 결합되는 비교 공고 p13을 더해 5 / 7에서 6 / 8로 바꿨다. 과제 3A: KED와 결합되는 p15와
     # 결합되지 않는 p16(1000000005는 KED 가상 파일에서 버려진 행)을 더해 7 / 10으로 바꿨다.
-    # infra-2b 과제 1: 날짜를 받아 base에 남는 p14(1000000002), p17(1000000006)이 모두 KED와 결합되어 9 / 12로 바꿨다
-    assert csv.loc[csv["has_use"] == False, "ked_matched_rate"].iloc[0] == pytest.approx(9 / 12, rel=1e-12)
+    # infra-2b 과제 1: 날짜를 받아 base에 남는 p14(1000000002), p17(1000000006)이 모두 KED와 결합되어 9 / 12로 바꿨다.
+    # infra-2b 과제 1 수정 1차: 행을 has_use에서 설정의 처치 정의(use_any)로 나눈 공고로 바꿨다. 비교 공고 8건(p03 p06
+    # p10 p12 p13 p14 p16 p17) 모두 사업자번호가 있고, p10, p16(1000000005)만 KED와 결합되지 않아 6 / 8이다
+    assert csv.loc[csv["arm"] == "비교 공고", "ked_matched_rate"].iloc[0] == pytest.approx(6 / 8, rel=1e-12)
 
 
 # 아래는 과제 10 수정(첫 실제 자료 실행에서 드러난 문제)에서 더한 시험이다.
@@ -221,9 +223,7 @@ def test_source_rows_sorted_by_count_within_year(synth_data, tmp_path):
 
 def test_sparse_grid_uses_the_analysis_sample(synth_data, tmp_path):
     cfg = synth_data["cfg"]; cfg["skills"]["sparse_filter"]["min_treated"] = 1
-    # infra-2b 과제 1: 설정의 처치 정의가 use_any로 바뀌었다. t03b는 처치 정의 use를 쓰고 학습 시간 측정은 설정의
-    # 처치 정의를 쓰므로, 두 값이 같은 공고와 처치 공고에서 나오는지 보는 이 시험은 처치 정의를 use로 둔다
-    cfg["treatment"]["definition"] = "use"
+    assert cfg["treatment"]["definition"] == "use_any"   # infra-2b 과제 1 수정 1차: 설정의 처치 정의 그대로 센다
     s00, d = load_script(), tmp_path / "s0"
     s00.scan(cfg, synth_data["root"], d)
     g = s00.build_tables(cfg, synth_data["root"], d)["t03b_sparse_filter_grid"]
@@ -232,12 +232,14 @@ def test_sparse_grid_uses_the_analysis_sample(synth_data, tmp_path):
     codes = treatment.agent_skill_codes(skills.load_codebook(synth_data["codebook"]), cfg)
     long = skills.drop_codes(pd.read_parquet(d / "skills_long.parquet"), codes["dev"] | codes["use"])
     timing = s00.time_outcome_model(pd.read_parquet(d / "base.parquet"), pd.read_parquet(d / "treat.parquet"), long, cfg)
-    # SM-01-0001과 synth.PLACEBO_CANDIDATE(둘 다 처치 공고 p02). 과제 5에서 p02에 PLACEBO_CANDIDATE를 더해 1에서 2로 바꿨다
-    assert row["n_skills_kept"].iloc[0] == timing["n_skills_kept"] == 2
-    # 네 단계를 모두 통과한 공고: p01 p02 p03 p05 p09 p11 p12 p13(과제 3) p15 p16(과제 3A),
-    # p14 p17(infra-2b 과제 1: 날짜를 받아 남는다. 10에서 12로 바꿨다)
-    assert row["n_postings"].iloc[0] == 12
-    assert row["n_treated"].iloc[0] == 2       # p02, p05 (p04는 사업자번호가 없어 빠진다)
+    # infra-2b 과제 1 수정 1차: 희소 필터는 설정의 처치 정의(use_any)의 처치 공고와 비교 공고만 대상으로 한다.
+    # 네 단계를 모두 통과한 공고 12건 가운데 처치 공고 p02 p05(생성형 AI 활용 숙련), p11 p15(키워드) 4건과
+    # 비교 공고 p03 p12 p13 p14 p16 p17 6건. p01, p09는 엄격한 사전의 키워드에 걸려 어느 쪽도 아니어서 뺀다
+    # (바꾸기 전: 처치 정의 use, 대상 공고 12건, 처치 공고 p02 p05 2건, 남는 숙련 2개)
+    assert row["n_postings"].iloc[0] == 10 and row["n_treated"].iloc[0] == 4
+    # 처치 공고에 한 번 이상 나온 숙련: SM-01-0001(p02, p15), PLACEBO_CANDIDATE(p02), IT-01-0001과 학사 학위(p11).
+    # p05의 숙련은 모두 AI 에이전트 숙련코드여서 세지 않는다
+    assert row["n_skills_kept"].iloc[0] == timing["n_skills_kept"] == 4
 
 
 def test_report_wording(synth_data, tmp_path):
@@ -259,13 +261,15 @@ def test_postings_with_only_agent_skill_codes(synth_data, tmp_path):
     # 과제 3: p13을 더해 전체 공고 수를 7에서 8로, 비율을 1 / 7에서 1 / 8로 바꿨다.
     # 과제 3A: p15, p16을 더해 전체 공고 수를 10으로, 비율을 1 / 10으로 바꿨다.
     # infra-2b 과제 1: 날짜를 받은 p14, p17이 남아 전체 공고 수를 12로, 비율을 1 / 12로 바꿨다.
+    # infra-2b 과제 1 수정 1차: 행을 has_use, has_dev, treat_code에서 설정의 처치 정의(use_any)의 처치 공고(p02 p05
+    # p11 p15)와 비교 공고(p03 p12 p13 p14 p16 p17)로 바꿨다(바꾸기 전: n [12, 2, 2, 3], n_no_outcome_skill [1, 1, 1, 1])
     s00, t = run(synth_data, tmp_path)
     e = t["t03e_no_outcome_skill"]
     assert list(e.columns) == ["group", "n", "n_no_outcome_skill", "no_outcome_skill_rate"]
     g = e.set_index("group")
-    assert g.index.tolist() == ["전체", "has_use", "has_dev", "treat_code"]
-    assert g["n"].tolist() == [12, 2, 2, 3] and g["n_no_outcome_skill"].tolist() == [1, 1, 1, 1]
-    assert g.loc["전체", "no_outcome_skill_rate"] == pytest.approx(1 / 12)
+    assert g.index.tolist() == ["전체", "처치 공고", "비교 공고"]
+    assert g["n"].tolist() == [12, 4, 6] and g["n_no_outcome_skill"].tolist() == [1, 1, 0]
+    assert g["no_outcome_skill_rate"].tolist() == pytest.approx([1 / 12, 1 / 4, 0.0])
     text = s00.write_report(t, _NO_TIMING, synth_data["cfg"], tmp_path / "report.md", commit="c").read_text(encoding="utf-8")
     assert text.index("### `t03d_match_stats`") < text.index("### `t03e_no_outcome_skill`") < text.index("## 4. ")
     assert "저자가 정한다" in s00._table_notes(synth_data["cfg"])["t03e_no_outcome_skill"]
@@ -355,6 +359,18 @@ def test_t13_lists_every_candidate_including_absent_ones(tables):
     assert list(t.columns) == ["skill_code", "skill_name", "detail", "n", "rate", "n_treated", "treated_rate",
                                "passes_sparse_filter"]
     assert t["skill_code"].iloc[0] == synth.ADJ_PRESENT              # 공고가 많은 순
+    # infra-2b 과제 1 수정 1차: 설정의 처치 정의(use_any)의 처치 공고 4건과 비교 공고 6건이 대상이다.
+    # ADJ_PRESENT는 비교 공고 p03에만 있다
+    a = t.set_index("skill_code").loc[synth.ADJ_PRESENT]
+    assert (a["n"], a["n_treated"], a["passes_sparse_filter"]) == (1, 0, False)
+    assert a["rate"] == pytest.approx(1 / 10) and a["treated_rate"] == 0
+
+
+def test_t14_counts_on_the_treated_and_comparison_postings(tables):
+    # infra-2b 과제 1 수정 1차. PLACEBO_CANDIDATE는 use_any의 처치 공고 p02에 있어 희소 필터(min_treated 1)를 통과한다.
+    # 출현율의 분모는 처치 공고와 비교 공고의 수(10)이다
+    p = tables["t14_placebo_candidates"].set_index("skill_code").loc[synth.PLACEBO_CANDIDATE]
+    assert p["n"] == 1 and p["rate"] == pytest.approx(1 / 10)
 
 
 def test_t14_has_no_treated_columns(tables):
@@ -460,13 +476,18 @@ def test_report_new_sections_and_notes(tables, synth_data, tmp_path):
 
 def test_t15_aiie_coverage(tables, synth_scan, synth_data, tmp_path):
     t = tables["t15_aiie_coverage"]
-    assert list(t.columns) == ["has_use", "n", "n_with_aiie", "with_aiie_rate", "p10", "p25", "p50", "p75", "p90"]
-    assert t["has_use"].tolist() == ["전체", "1", "0"]
+    # infra-2b 과제 1 수정 1차: 행을 has_use(1, 0)에서 설정의 처치 정의(use_any)로 나눈 처치 공고와 비교 공고로 바꿨다
+    assert list(t.columns) == ["arm", "n", "n_with_aiie", "with_aiie_rate", "p10", "p25", "p50", "p75", "p90"]
+    assert t["arm"].tolist() == ["전체", "처치 공고", "비교 공고"]
     assert (t["n_with_aiie"] <= t["n"]).all()
-    g = t.set_index("has_use")
-    # 전체 행의 n은 제외 규칙 네 단계를 적용한 공고 수(t03b의 n_postings)와 같다
-    assert g.loc["전체", "n"] == tables["t03b_sparse_filter_grid"]["n_postings"].iloc[0]
-    assert g.loc["1", "n"] + g.loc["0", "n"] == g.loc["전체", "n"]
+    g = t.set_index("arm")
+    # 전체 행은 제외 규칙 네 단계를 적용한 공고 12건, 처치 공고 4건(p02 p05 p11 p15), 비교 공고 6건이다.
+    # 처치 공고와 비교 공고를 더하면 t03b의 n_postings이다(어느 쪽도 아닌 p01, p09는 두 행에 없다)
+    assert g["n"].tolist() == [12, 4, 6]
+    assert g.loc["처치 공고", "n"] + g.loc["비교 공고", "n"] == tables["t03b_sparse_filter_grid"]["n_postings"].iloc[0]
+    # 소분류 620(1.5): p01, p13 / 862(0.5): p02, p14. 처치 공고 가운데 값이 붙는 공고는 p02뿐이고, 비교 공고 가운데는
+    # p13, p14이다
+    assert g["n_with_aiie"].tolist() == [4, 1, 2]
     # 산업코드가 없는 가상 공고(p05, p11)는 값이 붙지 않은 쪽에 센다
     s00 = synth_scan["s00"]
     base = pd.read_parquet(synth_scan["s0_dir"] / "base.parquet")
@@ -807,10 +828,43 @@ def test_report_states_the_configured_definition_and_fill(tables, synth_data, tm
     assert "period.fill.max_gap_days" in notes["t02e_fill_gap_by_period"]
     for name in ("t02a_treated_by_period", "t02c_occ_group_treated", "t02e_fill_gap_by_period", "t16_detail_by_arm"):
         assert "`use_any`" in notes[name]
-    for name in ("t04_bzno_ked_by_treatment", "t05_source", "t15_aiie_coverage"):
-        assert "숙련코드)이 있는지만 본 표시" in notes[name]
-    assert "설정의 처치 정의와 다르므로" in notes["t03b_sparse_filter_grid"]
+    # infra-2b 과제 1 수정 1차: 처치 공고를 나누는 표는 모두 설정의 처치 정의를 따른다고 한 문장으로 적는다
+    follows = "처치 공고와 비교 공고는 설정의 처치 정의(`treatment.definition` = `use_any`)를 따른다."
+    for name in ("t03b_sparse_filter_grid", "t03e_no_outcome_skill", "t04_bzno_ked_by_treatment", "t05_source",
+                 "t09a_by_ksic_sub", "t13_adjacent_candidates", "t14_placebo_candidates", "t15_aiie_coverage"):
+        assert follows in notes[name], name
+    assert follows in "".join(s00._timing_block(_NO_TIMING, cfg))
+    for removed in ("숙련코드)이 있는지만 본 표시", "설정의 처치 정의와 다르므로", "관계없이 이 정의를 쓴다",
+                    "설정의 처치 정의와 관계없다", "설정의 처치 정의가 `use`일 때만"):
+        assert removed not in text and removed not in "".join(notes.values())
+    assert "## 4. 처치 여부별 사업자번호 보유 비율과 KED 결합 비율" in text
+    assert "## 5. 연도별 수집 사이트 구성, 사이트별 처치 공고 비율과 숙련 보유 비율" in text
     assert set(s00.DEFINITION_TEXT) == set(treatment.DEFINITIONS)
+
+
+def test_tables_split_by_the_configured_definition(tables):
+    # infra-2b 과제 1 수정 1차. t04, t05, t09a는 base.parquet의 공고 15건(사업자번호와 숙련 제외 전)을 설정의 처치
+    # 정의(use_any)로 나눈다: 처치 공고 p02 p04 p05 p11 p15(p04는 사업자번호가 없다), 비교 공고 p03 p06 p10 p12 p13
+    # p14 p16 p17, 어느 쪽도 아닌 공고 p01 p09
+    t04 = tables["t04_bzno_ked_by_treatment"]
+    assert list(t04.columns) == ["arm", "n", "n_has_bzno", "has_bzno_rate", "n_ked_matched", "ked_matched_rate"]
+    assert t04["arm"].tolist() == ["전체", "처치 공고", "비교 공고"]
+    assert t04["n"].tolist() == [15, 5, 8] and t04["n_has_bzno"].tolist() == [14, 4, 8]
+    # KED와 결합되지 않는 공고: 사업자번호 1000000005의 p09, p10, p16
+    assert t04["n_ked_matched"].tolist() == [11, 4, 6]
+    assert t04["ked_matched_rate"].tolist() == pytest.approx([11 / 14, 1.0, 6 / 8])
+    # t05: 잡사이트A p01 p04 p10 p13 p16(처치 p04), 잡사이트B p02 p05 p11 p14 p17(처치 p02 p05 p11),
+    # 잡사이트C p03 p06 p09 p12 p15(처치 p15)
+    t05 = tables["t05_source"].set_index("source")
+    assert "treated_rate" in t05.columns and "has_use_rate" in t05.columns
+    assert t05.loc[["잡사이트A", "잡사이트B", "잡사이트C"], "treated_rate"].tolist() == pytest.approx([0.2, 0.6, 0.2])
+    assert t05.loc[["잡사이트A", "잡사이트B", "잡사이트C"], "has_use_rate"].tolist() == pytest.approx([0.2, 0.4, 0.0])
+    # t09a: 620은 p01 p13(처치 공고 없음), 862는 p02 p14(처치 p02), 012는 p03 p09 p15(처치 p15)
+    t09 = tables["t09a_by_ksic_sub"].set_index("ksic_sub")
+    assert list(t09.columns) == ["n", "n_has_use", "n_treated"]
+    assert t09.loc[["620", "862", "012"], "n"].tolist() == [2, 2, 3]
+    assert t09.loc[["620", "862", "012"], "n_treated"].tolist() == [0, 1, 1]
+    assert t09["n_treated"].sum() == 5 and t09["n_has_use"].sum() == 3
 
 
 def test_t10b_marks_the_occupations_removed_by_decision_39():
