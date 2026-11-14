@@ -138,6 +138,21 @@ def _check_period_groups(groups, unit, d_start, d_end, problems: list[str]) -> N
         problems.append(f"`period.groups`가 있으면 `period.unit`은 year여야 합니다: {unit!r}")
 
 
+FILL_KEYS = ("enabled", "max_gap_days")
+
+
+def _check_fill(fill, problems: list[str]) -> None:
+    """`period.fill`(설계 문서 결정 38)을 확인한다. 두 항목 `enabled`, `max_gap_days`만 있어야 한다."""
+    if not isinstance(fill, dict) or set(fill) != set(FILL_KEYS):
+        problems.append(f"`period.fill`은 `enabled`와 `max_gap_days` 두 항목만 든 사전이어야 합니다: {fill!r}")
+        return
+    if not isinstance(fill["enabled"], bool):
+        problems.append(f"`period.fill.enabled`는 true나 false여야 합니다: {fill['enabled']!r}")
+    gap = fill["max_gap_days"]
+    if gap is not None and not (_is_int(gap) and gap >= 0):
+        problems.append(f"`period.fill.max_gap_days`는 비워 두거나(null) 0 이상의 정수여야 합니다: {gap!r}")
+
+
 def _check_occupation_filters(cfg: dict, need, problems: list[str]) -> None:
     ex = need("occupations.exclude_keco2")
     if ex is not _MISSING:
@@ -223,6 +238,9 @@ def validate_config(cfg: dict) -> None:
     groups = need("period.groups")
     if groups is not _MISSING:
         _check_period_groups(groups, unit, d_start, d_end, problems)
+    fill = need("period.fill")
+    if fill is not _MISSING:
+        _check_fill(fill, problems)
 
     _check_occupation_filters(cfg, need, problems)
 

@@ -63,16 +63,32 @@ _BAD = [
     ("treatment.keywords.use", ["GPT", "("], "treatment.keywords.use"),
     ("data.aiie", "", "data.aiie"),
     ("period.date_columns", ["post_start", "post_end", "post_start"], r"period\.date_columns`에 같은 열 이름"),   # 최종 검토 수정
+    # infra-2b 과제 1(결정 38): 날짜를 채우는 규칙
+    ("period.fill", None, r"period\.fill`"),
+    ("period.fill", {"enabled": True}, r"period\.fill`"),                                                   # 항목이 빠짐
+    ("period.fill", {"enabled": True, "max_gap_days": None, "limit": 3}, r"period\.fill`"),                 # 모르는 항목
+    ("period.fill.enabled", "yes", r"period\.fill\.enabled"),
+    ("period.fill.enabled", 1, r"period\.fill\.enabled"),
+    ("period.fill.max_gap_days", -1, r"period\.fill\.max_gap_days"),
+    ("period.fill.max_gap_days", 30.5, r"period\.fill\.max_gap_days"),
+    ("period.fill.max_gap_days", True, r"period\.fill\.max_gap_days"),
+    ("period.fill.max_gap_days", "30", r"period\.fill\.max_gap_days"),
 ]
 
 
 def test_use_keywords_shipped():
     kw = paths.load_config()["treatment"]["keywords"]["use"]
-    assert len(kw) == 34 and len(set(kw)) == 34
+    assert len(kw) == 71 and len(set(kw)) == 71          # 결정 41에서 34에서 71로 바꿨다
     joined = re.compile("|".join(kw), re.IGNORECASE)
-    for hit in ["ChatGPT 활용 경험", "챗GPT", "생성형 AI 툴", "프롬프트 엔지니어링", "LLM 기반", "LLMs", "AI 활용 능력", "GenAI"]:
+    for hit in ["ChatGPT 활용 경험", "챗GPT", "생성형 AI 툴", "프롬프트 엔지니어링", "LLM 기반", "LLMs", "AI 활용 능력", "GenAI",
+                # 결정 41에서 더한 표현
+                "클로드 활용", "Codex 사용 경험", "코덱스", "나노바나나", "sLLM 구축", "Grok", "DALL-E", "Veo 3", "클링 AI",
+                "Cursor AI", "에이닷", "NotebookLM", "Llama 3", "DeepSeek"]:
         assert joined.search(hit), hit
-    for miss in ["Fulfillment 센터 운영", "풀필먼트", "명령 프롬프트", "KAI 활용", "달리 정한 바"]:
+    for miss in ["Fulfillment 센터 운영", "풀필먼트", "명령 프롬프트", "KAI 활용", "달리 정한 바",
+                 # 결정 41에서 더한 표현이 다른 뜻의 낱말에 걸리지 않는지
+                 "ngrok 터널", "리사이클링 AI 기술", "필수노하우", "CODEX 규격", "코덱스 기준", "windsurfing", "LlamaIndex",
+                 "런웨이 패션쇼", "cursor 위치", "에이닷컴", "gamma 보정"]:
         assert not joined.search(miss), miss
 
 
@@ -90,9 +106,14 @@ def test_shipped_values_of_2026_11_13():
     assert [(g["name"], g["years"]) for g in cfg["period"]["groups"]] == [
         ("초기", [2023, 2024]), ("1 도입기", [2025]), ("2 도입기", [2026])]
     assert cfg["period"]["date_columns"] == ["post_start", "post_end"]
-    assert len(cfg["occupations"]["keco4"]) == 25
+    assert len(cfg["occupations"]["keco4"]) == 20          # 결정 39에서 25에서 20으로 바꿨다
     assert not {"0122", "6121", "6154"} & set(cfg["occupations"]["keco4"])
-    assert cfg["occupations"]["exclude_keco2"] == ["01", "61"] and cfg["occupations"]["group_min_treated"] == 100
+    assert not {"2143", "2151", "4154", "4155", "4166"} & set(cfg["occupations"]["keco4"])
+    assert {c[:2] for c in cfg["occupations"]["keco4"]} == {"02", "13"}
+    # 결정 39에서 ["01", "61"]에서 바꿨다
+    assert cfg["occupations"]["exclude_keco2"] == ["01", "61", "21", "41"] and cfg["occupations"]["group_min_treated"] == 100
+    assert cfg["treatment"]["definition"] == "use_any"
+    assert cfg["period"]["fill"] == {"enabled": True, "max_gap_days": None}
     assert cfg["industry"]["not_in_table"] == "missing"
     assert cfg["region"]["merge_sido"] == {"광주·전남": ["광주", "전남", "전남광주"]}
     assert cfg["salary_band_edges"] == [26000000, 30000000, 35000000, 40000000]
@@ -112,7 +133,8 @@ def test_allowed_edge_values_pass():
                        ("treatment.keywords.broad_extra", []), ("treatment.keywords.exclude", []),
                        ("estimation.n_folds", 2), ("occupations.exclude_keco2", []),
                        ("skills.adjacent_candidate_details", []), ("region.merge_sido", {}),
-                       ("industry.not_in_table", "category")):
+                       ("industry.not_in_table", "category"), ("period.fill.enabled", False),
+                       ("period.fill.max_gap_days", 0), ("period.fill.max_gap_days", 30)):
         validate.validate_config(_set(cfg, key, value))
     # 분석 기간이 하루여도 된다(기간 묶음은 그 연도만 담는다). 2021-01-01은 기본 시작일 앞이므로 시작일도 함께 바꾼다
     one_day = _set(_set(_set(cfg, "period.start", "2021-01-01"), "period.end", "2021-01-01"),

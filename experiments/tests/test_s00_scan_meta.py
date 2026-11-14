@@ -14,8 +14,9 @@ import synth
 from test_s00_scan import load_script
 
 # 과제 4에서 period.date_columns, period.groups, industry.not_in_table, region.merge_sido를 더했다
+# infra-2b 과제 1에서 period.fill.enabled를 더했다(period.fill.max_gap_days는 2단계에서만 쓴다)
 SCAN_KEYS = ["data.years", "data.codebook", "data.ksic", "data.ked_firm", "period.start", "period.end",
-             "period.date_columns", "period.groups", "occupations.keco4", "industry.not_in_table",
+             "period.date_columns", "period.groups", "period.fill.enabled", "occupations.keco4", "industry.not_in_table",
              "region.merge_sido", "treatment.text_columns", "treatment.keywords", "treatment.agent_skills",
              "salary_band_edges"]
 
@@ -87,6 +88,7 @@ def test_build_tables_refuses_when_merge_sido_changed(synth_data, tmp_path):
 
 
 @pytest.mark.parametrize("key, value", [
+    ("period.fill.max_gap_days", 30),            # infra-2b 과제 1
     ("skills.sparse_filter", {"min_rate": 0.002, "min_treated": 1}),
     ("treatment.definition", "all"),
     ("treatment.keyword_dictionary", "broad"),
@@ -99,6 +101,13 @@ def test_report_only_keys_do_not_require_a_new_scan(synth_data, tmp_path, key, v
     s00, _ = _scan(synth_data, tmp_path)
     tables = s00.build_tables(_set(synth_data["cfg"], key, value), synth_data["root"], tmp_path / "s0")
     assert "t01_exclusions" in tables
+
+
+def test_turning_fill_on_or_off_requires_a_new_scan(synth_data, tmp_path):
+    # infra-2b 과제 1. 날짜를 채우는지는 base의 공고를 바꾸므로 scan을 다시 해야 한다
+    s00, _ = _scan(synth_data, tmp_path)
+    with pytest.raises(RuntimeError, match=r"period\.fill\.enabled"):
+        s00.build_tables(_set(synth_data["cfg"], "period.fill.enabled", False), synth_data["root"], tmp_path / "s0")
 
 
 def test_missing_or_broken_meta_stops_the_report(synth_data, tmp_path):
@@ -162,9 +171,12 @@ def test_rename_is_retried_on_permission_error(synth_data, tmp_path, monkeypatch
     s00 = load_script()
     tries = _replace_failing(monkeypatch, s00, 2)
     out = s00.scan(synth_data["cfg"], synth_data["root"], tmp_path / "s0")
-    assert len(tries) == 10 and set(tries.values()) == {3}   # 과제 4에서 post_end_gap을 더해 9에서 바꿨다
+    # 과제 4에서 post_end_gap을 더해 9에서 10으로, infra-2b 과제 1에서 date_fill을 더해 11로 바꿨다
+    assert len(tries) == 11 and set(tries.values()) == {3}
     assert all(p.exists() for p in out.values())
-    assert len(pd.read_parquet(out["base"])) == 13   # 과제 3: p13이 더해져 10에서 11로, 과제 3A: p15, p16이 더해져 13으로 바꿨다
+    # 과제 3: p13이 더해져 10에서 11로, 과제 3A: p15, p16이 더해져 13으로, infra-2b 과제 1: 날짜를 받은 p14, p17이
+    # 남아 15로 바꿨다
+    assert len(pd.read_parquet(out["base"])) == 15
 
 
 def test_rename_gives_up_and_cleans_up(synth_data, tmp_path, monkeypatch):

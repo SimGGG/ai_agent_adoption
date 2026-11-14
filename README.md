@@ -1,6 +1,6 @@
 # 생성형 AI 활용 숙련과 숙련 묶음 연구
 
-한국 채용 공고 자료로, 생성형 AI 활용 숙련이 들어 있는 공고(처치 공고)와 그렇지 않은 공고(비교 공고)의 숙련 묶음 차이를 DML(이중 머신러닝)로 추정하는 연구의 작업 폴더이다. 분석 방법은 `proposal.md`에, 작업 환경의 설계는 `docs/superpowers/specs/2026-11-12-research-infra-design.md`에 있다. 작업 규칙은 `CLAUDE.md`에 있다.
+한국 채용 공고 자료로, 생성형 AI 활용 숙련이 들어 있거나 본문이 생성형 AI 활용 키워드 사전에 걸린 공고(처치 공고)와 그렇지 않은 공고(비교 공고)의 숙련 묶음 차이를 DML(이중 머신러닝)로 추정하는 연구의 작업 폴더이다. 분석 대상은 경영·행정·사무직(`02`)과 정보통신 연구개발직 및 공학기술직(`13`)에 속한 직종 세분류 20개이다. 분석 방법은 `proposal.md`에, 작업 환경의 설계는 `docs/superpowers/specs/2026-11-12-research-infra-design.md`에 있다. 작업 규칙은 `CLAUDE.md`에 있다.
 
 ## 폴더 구조
 
@@ -102,9 +102,11 @@ PYTHONNOUSERSITE=1 PYTHONUTF8=1 "$(conda info --base)/envs/aabundle/python.exe" 
 ./tools/py.ps1 experiments/scripts/s00_data_audit.py all
 ```
 
-- `scan`: `data.years`의 연도별 공고 파일 네 개(2023~2026년), 숙련 설명 파일, 산업 분류표(`KSIC10.xlsx`), KED 기업 자료를 한 번 읽어 중간 자료 아홉 파일(`base`, `treat`, `skills_long`, `occ_year_all`, `scan_stats`, `kw_pattern_hits`, `post_start_missing`, `sido_other_words`, `post_end_gap`, 모두 parquet)과 1단계 기록 `scan_meta.json`(실행한 시각, git 커밋, 커밋하지 않은 변경이 있었는지, 아래 표의 `scan`을 다시 해야 하는 설정 항목의 값)을 `experiments/outputs/s0/`에 쓴다.
+- `scan`: `data.years`의 연도별 공고 파일 네 개(2023~2026년), 숙련 설명 파일, 산업 분류표(`KSIC10.xlsx`), KED 기업 자료를 한 번 읽어 중간 자료 아홉 파일(`base`, `treat`, `skills_long`, `occ_year_all`, `scan_stats`, `kw_pattern_hits`, `post_start_missing`, `sido_other_words`, `post_end_gap`, 모두 parquet)과, 설정 `period.fill.enabled`가 true이면 `date_fill`(parquet), 1단계 기록 `scan_meta.json`(실행한 시각, git 커밋, 커밋하지 않은 변경이 있었는지, 아래 표의 `scan`을 다시 해야 하는 설정 항목의 값)을 `experiments/outputs/s0/`에 쓴다.
 - `report`: 중간 자료와 함께 숙련 설명 파일, 직종 분류표(`KECO2025.xlsx`), KED 기업 자료(`ked.extract_ked_firm`으로 줄 수와 기업 수를 센다), 산업별 AI 노출 지수의 외부 자료 세 파일(아래 "외부 자료")을 읽어 집계표(CSV)를 `experiments/outputs/s0/tables/`에 쓰고, 결과모형(공고의 특성으로 그 숙련이 공고에 들어 있을 확률을 예측하는 모형) 한 번의 학습 시간을 잰 뒤 `docs/s0-data-audit.md`를 쓴다. 먼저 `scan_meta.json`의 설정 값과 지금 `config.yaml`을 비교해, 다른 항목이 있으면 그 항목을 모두 적고 멈춘다.
 - `all`: `scan` 다음에 `report`를 실행한다.
+
+게시일은 `post_start`이고, 없으면 `post_end`를 쓴다. 두 날짜가 모두 없는 공고는 같은 연도 파일에서 행 순서로 가장 가까운 앞 공고의 날짜를 받는다(`period.fill.enabled`, 결정 38). `scan`은 이를 위해 연도 파일마다 날짜 열만 파일 전체에서 먼저 읽는다. 날짜를 받은 공고는 `base`의 `date_source`가 `fill`이고, 바로 앞과 바로 뒤의 날짜 있는 공고 사이의 일수가 `fill_gap_days`에 있다. `date_fill`은 날짜를 받은 공고를 파일 연도 × 수집 사이트 × 그 일수의 구간별로 센 표이며, 보고서의 `t01d_date_fill`과 `t02e_fill_gap_by_period`(날짜를 받은 공고의 기간 × 구간별 수)가 이 내용을 싣는다. `period.fill.enabled`가 false이면 두 표는 만들지 않는다.
 
 두 명령 모두 일을 시작하기 전에 `config.yaml`의 값이 쓸 수 있는 형태인지 확인한다(`aabundle/validate.py`). 예를 들어 `occupations.keco4`의 코드를 따옴표 없이 적으면 멈춘다.
 
@@ -112,8 +114,8 @@ PYTHONNOUSERSITE=1 PYTHONUTF8=1 "$(conda info --base)/envs/aabundle/python.exe" 
 
 | 다시 실행할 명령 | 설정 항목 |
 |---|---|
-| `scan`부터(`all`) | `data.years`, `data.codebook`, `data.ksic`, `data.ked_firm`, `period.start`, `period.end`, `period.date_columns`, `period.groups`, `occupations.keco4`, `industry.not_in_table`, `region.merge_sido`, `treatment.text_columns`, `treatment.keywords`, `treatment.agent_skills`, `salary_band_edges` |
-| `report`만 | `data.keco`, `data.aiie`, `data.naics_isic`, `data.ksic_isic`, `period.unit`, `occupations.min_use_postings`, `occupations.exclude_keco2`, `occupations.group_min_treated`, `sample.require_bzno`, `treatment.definition`, `treatment.keyword_dictionary`, `skills`, `estimation` |
+| `scan`부터(`all`) | `data.years`, `data.codebook`, `data.ksic`, `data.ked_firm`, `period.start`, `period.end`, `period.date_columns`, `period.groups`, `period.fill.enabled`, `occupations.keco4`, `industry.not_in_table`, `region.merge_sido`, `treatment.text_columns`, `treatment.keywords`, `treatment.agent_skills`, `salary_band_edges` |
+| `report`만 | `data.keco`, `data.aiie`, `data.naics_isic`, `data.ksic_isic`, `period.unit`, `period.fill.max_gap_days`, `occupations.min_use_postings`, `occupations.exclude_keco2`, `occupations.group_min_treated`, `sample.require_bzno`, `treatment.definition`, `treatment.keyword_dictionary`, `skills`, `estimation` |
 
 표에 없는 항목은 `occ_group` 하나이며, 자료 점검에서 쓰지 않는다. `skills`와 `estimation` 아래에도 자료 점검이 쓰지 않는 항목(`skills.adjacent`, `skills.placebo`, `estimation.trim`)이 있지만, 같은 묶음의 다른 항목을 `report`가 쓰므로 표에는 묶음 이름으로 적었다.
 

@@ -12,7 +12,12 @@ EXCLUSION_STEPS = ("in_period", "in_occ", "has_bzno", "has_skill")
 
 _KED_COLUMNS = ["ked_estab_year", "ked_size", "ked_ipo", "ked_venture"]
 
-BASE_COLUMNS = ["posting_id", "source", "year", "month", "quarter", "period", "date_source", "bzno", "ksic5",
+# 게시일과 마감일이 모두 없어, 같은 연도 파일에서 행 순서로 가장 가까운 앞 공고의 날짜를 게시일로 쓴 공고의
+# `date_source` 값(설계 문서 결정 38)
+FILL_SOURCE = "fill"
+FILL_COLUMNS = ["fill_date", "fill_gap_days"]
+
+BASE_COLUMNS = ["posting_id", "source", "year", "month", "quarter", "period", "date_source", "fill_gap_days", "bzno", "ksic5",
                 "ksic_sub", "firm_emp_log", "keco4", "keco2", "career_type", "career_years_min", "edu_level",
                 "salary_annual_min", "salary_band", "emp_type", "sido", "dup_count", "ai_peripheral",
                 "ked_matched", "firm_age", "ked_size", "ked_ipo", "ked_venture",
@@ -136,6 +141,24 @@ def unusable_dates(raw: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     return pd.DataFrame(out, index=raw.index)
 
 
+def fill_posting_dates(date: pd.Series) -> tuple[pd.Series, pd.Series]:
+    """날짜가 없는 공고에 채울 날짜와 앞뒤 날짜의 간격(일)을 돌려준다(설계 문서 결정 38).
+
+    `date`는 연도 파일 하나의 모든 공고의 게시일(`posting_date`의 첫 값)을 파일의 행 순서대로 담은 열이다.
+    날짜가 없는 공고의 `fill_date`는 행 순서로 가장 가까운 앞 공고 가운데 날짜가 있는 공고의 날짜이고, 앞에 날짜가
+    있는 공고가 없으면 결측이다. 날짜가 있는 공고의 `fill_date`는 결측이다. `fill_gap_days`는 `fill_date`가 있는
+    공고에서 그 날짜와, 행 순서로 가장 가까운 뒤 공고 가운데 날짜가 있는 공고의 날짜 사이의 일수(절댓값)이다.
+    뒤에 날짜가 있는 공고가 없거나 `fill_date`가 없으면 결측이다. 두 열 모두 색인이 `date`와 같다.
+    """
+    d = pd.Series(date, copy=True).astype("datetime64[ns]")
+    before = d.ffill()
+    after = d.bfill()
+    fill_date = before.where(d.isna())
+    days = (after - fill_date).abs().dt.days
+    gap = days.astype("Float64").astype("Int64")
+    return fill_date, gap
+
+
 def period_name(year: pd.Series, groups: list[dict]) -> pd.Series:
     """연도마다 그 연도가 드는 기간의 이름을 돌려준다(설계 문서 결정 24). 어느 기간에도 들지 않으면 결측."""
     to_name = {int(y): g["name"] for g in groups for y in g["years"]}
@@ -158,10 +181,25 @@ def salary_band(salary: pd.Series, edges: list[float]) -> pd.Series:
     return band.astype("string").fillna("미기재")
 
 
-def build_posting_base(raw: pd.DataFrame, ked_firm: pd.DataFrame, ksic_valid: set[str], cfg: dict) -> pd.DataFrame:
+def _check_fill(fill: pd.DataFrame, n: int) -> None:
+    absent = [c for c in FILL_COLUMNS if c not in fill.columns]
+    if absent:
+        raise ValueError(f"채울 날짜 자료(fill)에 없는 열이 있습니다: {', '.join(absent)}")
+    if len(fill) != n:
+        raise ValueError(f"채울 날짜 자료(fill)의 행 수({len(fill)})가 공고 자료의 행 수({n})와 다릅니다")
+
+
+def build_posting_base(raw: pd.DataFrame, ked_firm: pd.DataFrame, ksic_valid: set[str], cfg: dict,
+                       fill: pd.DataFrame | None = None) -> pd.DataFrame:
     """공고 원자료와 KED 기업 자료를 합쳐 공고 한 건당 한 행의 기본 자료를 만든다.
 
     입력과 행 수와 순서가 같다. 결합 뒤 행 수가 달라지면 RuntimeError를 낸다.
+
+    `fill`은 None이거나 열 `fill_date`, `fill_gap_days`(`fill_posting_dates`의 결과)가 있고 `raw`와 행 수가 같은
+    표이며, `raw`와 위치로 맞춘다. 행 수가 다르거나 열이 없으면 ValueError를 낸다. 게시일(`posting_date`)이 없고
+    `fill_date`가 있는 공고는 `fill_date`를 게시일로 쓰고, `date_source`는 `fill`, `fill_gap_days`는 `fill`의 값이다.
+    그 밖의 공고와 `fill`이 None일 때의 `fill_gap_days`는 결측이다. 연도, 월, 분기, 기간, 분석 기간 여부, 업력은
+    최종 게시일로 계산한다.
     """
     raw = raw.reset_index(drop=True)
     n = len(raw)
@@ -169,6 +207,15 @@ def build_posting_base(raw: pd.DataFrame, ked_firm: pd.DataFrame, ksic_valid: se
     # 게시일은 설정 `period.date_columns`의 순서대로 정한다(`post_start`, 없으면 `post_end`).
     # 시각을 버린 날짜로 비교하므로, 끝 날의 자정 뒤에 게시된 공고도 분석 기간 안이다.
     days, date_source = posting_date(raw, cfg["period"]["date_columns"])
+    fill_gap = pd.Series(pd.NA, index=raw.index, dtype="Int64")
+    if fill is not None:
+        _check_fill(fill, n)
+        fill_date = pd.Series(pd.to_datetime(fill["fill_date"]).to_numpy(), index=raw.index).astype("datetime64[ns]")
+        gap = pd.Series(fill["fill_gap_days"].astype("Int64").to_numpy(), index=raw.index, dtype="Int64")
+        take = days.isna() & fill_date.notna()
+        days = days.where(~take, fill_date)
+        date_source = date_source.where(~take, FILL_SOURCE)
+        fill_gap = gap.where(take, pd.NA)
     year = days.dt.year.astype("Int64")
     month = days.dt.month.astype("Int64")
     quarter = year.astype("string") + "Q" + days.dt.quarter.astype("Int64").astype("string")
@@ -198,6 +245,7 @@ def build_posting_base(raw: pd.DataFrame, ked_firm: pd.DataFrame, ksic_valid: se
         "quarter": quarter,
         "period": period_name(year, cfg["period"]["groups"]),
         "date_source": date_source,
+        "fill_gap_days": fill_gap,
         "bzno": bzno,
         "ksic5": classif.normalize_ksic(raw["ksic10"]),
         "ksic_sub": classif.ksic_sub(raw["ksic10"], ksic_valid, cfg["industry"]["not_in_table"]),
@@ -231,11 +279,24 @@ def apply_exclusions(base: pd.DataFrame, cfg: dict, has_skill: pd.Series | None 
     건수는 앞 단계를 통과한 공고만 대상으로 센다. 건너뛴 단계는 표에 행이 없다.
     게시일을 정할 수 없는 공고는 `year`가 결측이며, 건수 표에도 `year`가 결측인 행으로 나온다.
     `has_skill`은 `base`와 위치로 맞춘다(길이가 같아야 한다).
+
+    설정 `period.fill.max_gap_days`에 값이 있으면, 날짜를 채운 공고(`date_source` = `fill`)는 앞뒤 날짜의 간격
+    (`fill_gap_days`)이 있고 그 값 이하일 때만 분석 기간 단계를 통과한다. 이때 `base`에 `date_source`와
+    `fill_gap_days` 열이 있어야 한다. 값이 없으면(null) 이 규칙은 적용하지 않는다.
     """
     if has_skill is not None and len(has_skill) != len(base):
         raise ValueError(f"has_skill의 길이({len(has_skill)})가 기본 자료의 행 수({len(base)})와 다릅니다")
+    in_period = base["in_period"].to_numpy(dtype=bool)
+    max_gap = cfg["period"]["fill"]["max_gap_days"]
+    if max_gap is not None:
+        absent = [c for c in ("date_source", "fill_gap_days") if c not in base.columns]
+        if absent:
+            raise KeyError(f"`period.fill.max_gap_days`를 적용할 열이 기본 자료에 없습니다: {', '.join(absent)}")
+        filled = (base["date_source"].astype("string") == FILL_SOURCE).fillna(False).to_numpy(dtype=bool)
+        near = base["fill_gap_days"].astype("Float64").le(max_gap).fillna(False).to_numpy(dtype=bool)
+        in_period = in_period & (~filled | near)
     conditions = {
-        "in_period": base["in_period"].to_numpy(dtype=bool),
+        "in_period": in_period,
         "in_occ": base["in_occ"].to_numpy(dtype=bool),
     }
     if cfg["sample"]["require_bzno"]:

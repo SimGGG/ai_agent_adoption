@@ -187,6 +187,100 @@ def test_apply_exclusions_keeps_input_index_labels(base, synth_data):
     # 123: 과제 3에서 더한 p13. 143, 153: 과제 3A에서 더한 p15, p16
     assert kept.index.tolist() == [3, 13, 23, 43, 53, 83, 93, 103, 113, 123, 143, 153]
 
+# 아래는 infra-2b 과제 1(결정 38)에서 더한 시험이다.
+
+def test_fill_posting_dates():
+    d = pd.Series(pd.to_datetime([None, "2025-03-01", None, None, "2025-03-11", "2025-03-05", None]),
+                  index=[10, 11, 12, 13, 14, 15, 16])
+    fill, gap = sample.fill_posting_dates(d)
+    assert fill.index.tolist() == gap.index.tolist() == d.index.tolist()
+    assert fill.isna().tolist() == [True, True, False, False, True, True, False]
+    assert fill[12] == fill[13] == pd.Timestamp("2025-03-01") and fill[16] == pd.Timestamp("2025-03-05")
+    assert str(gap.dtype) == "Int64"
+    assert gap.isna().tolist() == [True, True, False, False, True, True, True]
+    assert gap[12] == gap[13] == 10
+
+
+def test_fill_posting_dates_gap_is_absolute_and_empty_input():
+    d = pd.Series(pd.to_datetime(["2025-03-11", None, "2025-03-05"]))
+    fill, gap = sample.fill_posting_dates(d)
+    assert fill[1] == pd.Timestamp("2025-03-11") and gap[1] == 6
+    fill, gap = sample.fill_posting_dates(pd.Series([], dtype="datetime64[ns]"))
+    assert len(fill) == len(gap) == 0
+    fill, gap = sample.fill_posting_dates(pd.Series(pd.to_datetime([None, None])))
+    assert fill.isna().all() and gap.isna().all()
+
+
+def _fill_raw(synth_data):
+    """가상 공고 다섯 건: (a) 게시일 있음, (b) 마감일만 있음, (c) 두 날짜 모두 없음 두 건, (d) 두 날짜 모두 없음.
+    가상 자료의 분석 기간은 2025년이다."""
+    raw = pd.concat(rawio.iter_postings(synth_data["postings_dir"], 2025, sample.RAW_COLUMNS)).reset_index(drop=True)
+    raw = raw.iloc[:5].copy()
+    raw["post_start"] = [pd.Timestamp("2025-03-02"), None, None, None, None]
+    raw["post_end"] = [None, pd.Timestamp("2025-04-01"), None, None, None]
+    fill = pd.DataFrame({"fill_date": pd.to_datetime([None, None, "2025-06-30", "2024-12-31", None]),
+                         "fill_gap_days": pd.array([None, None, 3, 40, None], dtype="Int64")})
+    return raw, fill
+
+
+def test_base_takes_filled_dates(synth_data):
+    raw, fill = _fill_raw(synth_data)
+    k, cfg = ked.extract_ked_firm(synth_data["ked_firm"]), synth_data["cfg"]
+    b = sample.build_posting_base(raw, k, set(), cfg, fill=fill)
+    assert b.columns.tolist() == sample.BASE_COLUMNS
+    assert b.columns.get_loc("fill_gap_days") == b.columns.get_loc("date_source") + 1
+    assert b["date_source"].tolist()[:4] == ["post_start", "post_end", "fill", "fill"] and pd.isna(b["date_source"][4])
+    assert b["year"].tolist()[:4] == [2025, 2025, 2025, 2024] and pd.isna(b["year"][4])
+    assert b["month"].tolist()[2:4] == [6, 12] and b["quarter"].tolist()[2:4] == ["2025Q2", "2024Q4"]
+    assert b["in_period"].tolist() == [True, True, True, False, False]
+    assert b["period"][2] == synth.PERIOD_NAME and pd.isna(b["period"][3])
+    assert str(b["fill_gap_days"].dtype) == "Int64"
+    assert b["fill_gap_days"].isna().tolist() == [True, True, False, False, True]
+    assert b["fill_gap_days"].tolist()[2:4] == [3, 40]
+    # fill이 없으면 전과 같다. 두 날짜가 모두 없는 공고는 날짜가 없고 fill_gap_days는 모두 결측이다
+    before = sample.build_posting_base(raw, k, set(), cfg)
+    assert before["date_source"].tolist()[:2] == ["post_start", "post_end"] and before["date_source"][2:].isna().all()
+    assert before["in_period"].tolist() == [True, True, False, False, False]
+    assert before["fill_gap_days"].isna().all() and str(before["fill_gap_days"].dtype) == "Int64"
+    # 날짜가 있는 공고에는 fill_date가 있어도 쓰지 않는다
+    own = fill.assign(fill_date=pd.to_datetime(["2020-01-01"] * 5), fill_gap_days=pd.array([9] * 5, dtype="Int64"))
+    b2 = sample.build_posting_base(raw, k, set(), cfg, fill=own)
+    assert b2["date_source"].tolist() == ["post_start", "post_end", "fill", "fill", "fill"]
+    assert b2["fill_gap_days"].isna().tolist() == [True, True, False, False, False]
+
+
+def test_base_rejects_a_fill_table_that_does_not_fit(synth_data):
+    raw, fill = _fill_raw(synth_data)
+    k, cfg = ked.extract_ked_firm(synth_data["ked_firm"]), synth_data["cfg"]
+    with pytest.raises(ValueError, match="행 수"):
+        sample.build_posting_base(raw, k, set(), cfg, fill=fill.iloc[:4])
+    with pytest.raises(ValueError, match="fill_gap_days"):
+        sample.build_posting_base(raw, k, set(), cfg, fill=fill.drop(columns="fill_gap_days"))
+
+
+def test_max_gap_days_drops_far_filled_postings_at_the_period_step(synth_data):
+    cfg = synth_data["cfg"]
+    base = pd.DataFrame({
+        "year": pd.array([2025] * 5, dtype="Int64"),
+        "in_period": True, "in_occ": True, "has_bzno": True,
+        "date_source": pd.array(["post_start", "fill", "fill", "fill", "post_end"], dtype="string"),
+        "fill_gap_days": pd.array([None, 3, 40, None, None], dtype="Int64"),
+    })
+    assert cfg["period"]["fill"]["max_gap_days"] is None
+    kept, counts = sample.apply_exclusions(base, cfg)
+    assert kept.index.tolist() == [0, 1, 2, 3, 4]                 # 값이 없으면 날짜를 채운 공고도 모두 남는다
+    cfg["period"]["fill"]["max_gap_days"] = 30
+    kept, counts = sample.apply_exclusions(base, cfg)
+    # 간격이 30일보다 큰 공고(2)와 뒤에 날짜가 없어 간격이 결측인 공고(3)가 분석 기간 단계에서 빠진다
+    assert kept.index.tolist() == [0, 1, 4]
+    c = counts.set_index("step")
+    assert c.loc["in_period", "n_dropped"] == 2 and c.loc["in_period", "n_after"] == 3
+    cfg["period"]["fill"]["max_gap_days"] = 40                     # 경계값은 남는다
+    assert sample.apply_exclusions(base, cfg)[0].index.tolist() == [0, 1, 2, 4]
+    with pytest.raises(KeyError, match="fill_gap_days"):
+        sample.apply_exclusions(base.drop(columns="fill_gap_days"), cfg)
+
+
 def test_missing_bzno_never_joins(synth_data):
     raw = pd.concat(rawio.iter_postings(synth_data["postings_dir"], 2025, sample.RAW_COLUMNS))
     k = ked.extract_ked_firm(synth_data["ked_firm"])

@@ -17,7 +17,7 @@ def test_exclusion_table_matches_fixture(synth_data, tmp_path):
     _, t = run(synth_data, tmp_path)
     c = t["t01_exclusions"].query("year == 2025").set_index("step")
     assert c.loc["in_occ", "n_dropped"] == 2 and c.loc["has_bzno", "n_dropped"] == 1
-    assert c.loc["has_skill", "n_dropped"] == 2 and c.loc["has_skill", "n_after"] == 10   # 과제 3: p13을 더해 7에서 8로, 과제 3A: p15, p16을 더해 10으로 바꿨다
+    assert c.loc["has_skill", "n_dropped"] == 2 and c.loc["has_skill", "n_after"] == 12   # 과제 3: p13을 더해 7에서 8로, 과제 3A: p15, p16을 더해 10으로 바꿨다. infra-2b 과제 1: 날짜를 받은 p14, p17이 남아 12로 바꿨다
 
 def test_treated_counts_by_period(synth_data, tmp_path):
     _, t = run(synth_data, tmp_path)
@@ -143,8 +143,9 @@ def test_report_numbers_keep_small_rates_and_csv_keeps_full_precision(synth_data
     # CSV에는 보고서용으로 줄인 값이 아니라 계산한 값 그대로가 들어간다
     csv = pd.read_csv(tmp_path / "s0" / "tables" / "t04_bzno_ked_by_treatment.csv", encoding="utf-8-sig")
     # 과제 3: KED와 결합되는 비교 공고 p13을 더해 5 / 7에서 6 / 8로 바꿨다. 과제 3A: KED와 결합되는 p15와
-    # 결합되지 않는 p16(1000000005는 KED 가상 파일에서 버려진 행)을 더해 7 / 10으로 바꿨다
-    assert csv.loc[csv["has_use"] == False, "ked_matched_rate"].iloc[0] == pytest.approx(7 / 10, rel=1e-12)
+    # 결합되지 않는 p16(1000000005는 KED 가상 파일에서 버려진 행)을 더해 7 / 10으로 바꿨다.
+    # infra-2b 과제 1: 날짜를 받아 base에 남는 p14(1000000002), p17(1000000006)이 모두 KED와 결합되어 9 / 12로 바꿨다
+    assert csv.loc[csv["has_use"] == False, "ked_matched_rate"].iloc[0] == pytest.approx(9 / 12, rel=1e-12)
 
 
 # 아래는 과제 10 수정(첫 실제 자료 실행에서 드러난 문제)에서 더한 시험이다.
@@ -204,6 +205,9 @@ def test_report_row_limit_per_table():
 
 
 def test_source_rows_sorted_by_count_within_year(synth_data, tmp_path):
+    # infra-2b 과제 1: 날짜를 채우는 설정이 기본값이 되면 잡사이트B의 p14, p17이 base에 남아 세 사이트가 모두 5건이
+    # 되므로, 건수로 정렬하는지 보는 이 시험은 날짜를 채우지 않는 설정으로 실행한다(기대값은 그대로)
+    synth_data["cfg"]["period"]["fill"]["enabled"] = False
     _, t = run(synth_data, tmp_path)
     s = t["t05_source"]
     # 과제 3에서 잡사이트A의 공고 p13이 더해져 잡사이트A와 C가 4건으로 같아졌다. 건수가 같으면 이름 순이고,
@@ -217,6 +221,9 @@ def test_source_rows_sorted_by_count_within_year(synth_data, tmp_path):
 
 def test_sparse_grid_uses_the_analysis_sample(synth_data, tmp_path):
     cfg = synth_data["cfg"]; cfg["skills"]["sparse_filter"]["min_treated"] = 1
+    # infra-2b 과제 1: 설정의 처치 정의가 use_any로 바뀌었다. t03b는 처치 정의 use를 쓰고 학습 시간 측정은 설정의
+    # 처치 정의를 쓰므로, 두 값이 같은 공고와 처치 공고에서 나오는지 보는 이 시험은 처치 정의를 use로 둔다
+    cfg["treatment"]["definition"] = "use"
     s00, d = load_script(), tmp_path / "s0"
     s00.scan(cfg, synth_data["root"], d)
     g = s00.build_tables(cfg, synth_data["root"], d)["t03b_sparse_filter_grid"]
@@ -227,7 +234,9 @@ def test_sparse_grid_uses_the_analysis_sample(synth_data, tmp_path):
     timing = s00.time_outcome_model(pd.read_parquet(d / "base.parquet"), pd.read_parquet(d / "treat.parquet"), long, cfg)
     # SM-01-0001과 synth.PLACEBO_CANDIDATE(둘 다 처치 공고 p02). 과제 5에서 p02에 PLACEBO_CANDIDATE를 더해 1에서 2로 바꿨다
     assert row["n_skills_kept"].iloc[0] == timing["n_skills_kept"] == 2
-    assert row["n_postings"].iloc[0] == 10     # 네 단계를 모두 통과한 공고: p01 p02 p03 p05 p09 p11 p12 p13(과제 3) p15 p16(과제 3A)
+    # 네 단계를 모두 통과한 공고: p01 p02 p03 p05 p09 p11 p12 p13(과제 3) p15 p16(과제 3A),
+    # p14 p17(infra-2b 과제 1: 날짜를 받아 남는다. 10에서 12로 바꿨다)
+    assert row["n_postings"].iloc[0] == 12
     assert row["n_treated"].iloc[0] == 2       # p02, p05 (p04는 사업자번호가 없어 빠진다)
 
 
@@ -249,13 +258,14 @@ def test_postings_with_only_agent_skill_codes(synth_data, tmp_path):
     # IT-05-0410)뿐이어서, 54개 코드를 빼면 결과변수로 쓰는 숙련이 하나도 없다.
     # 과제 3: p13을 더해 전체 공고 수를 7에서 8로, 비율을 1 / 7에서 1 / 8로 바꿨다.
     # 과제 3A: p15, p16을 더해 전체 공고 수를 10으로, 비율을 1 / 10으로 바꿨다.
+    # infra-2b 과제 1: 날짜를 받은 p14, p17이 남아 전체 공고 수를 12로, 비율을 1 / 12로 바꿨다.
     s00, t = run(synth_data, tmp_path)
     e = t["t03e_no_outcome_skill"]
     assert list(e.columns) == ["group", "n", "n_no_outcome_skill", "no_outcome_skill_rate"]
     g = e.set_index("group")
     assert g.index.tolist() == ["전체", "has_use", "has_dev", "treat_code"]
-    assert g["n"].tolist() == [10, 2, 2, 3] and g["n_no_outcome_skill"].tolist() == [1, 1, 1, 1]
-    assert g.loc["전체", "no_outcome_skill_rate"] == pytest.approx(1 / 10)
+    assert g["n"].tolist() == [12, 2, 2, 3] and g["n_no_outcome_skill"].tolist() == [1, 1, 1, 1]
+    assert g.loc["전체", "no_outcome_skill_rate"] == pytest.approx(1 / 12)
     text = s00.write_report(t, _NO_TIMING, synth_data["cfg"], tmp_path / "report.md", commit="c").read_text(encoding="utf-8")
     assert text.index("### `t03d_match_stats`") < text.index("### `t03e_no_outcome_skill`") < text.index("## 4. ")
     assert "저자가 정한다" in s00._table_notes(synth_data["cfg"])["t03e_no_outcome_skill"]
@@ -373,12 +383,18 @@ def test_t16_t17_t18(tables):
     assert (t18["n_firms_with_earlier"] <= t18["n_firms"]).all()
 
 
-def test_t16_t17_t18_values_on_synthetic_postings(tables):
-    # 설정의 처치 정의는 use: 처치 공고 p02(기업 1000000001), p05(1000000003). 비교 공고는 네 단계를 통과한 공고
+def test_t16_t17_t18_values_on_synthetic_postings(synth_scan):
+    # infra-2b 과제 1: 설정의 처치 정의가 use_any로 바뀌어, 표의 계산을 보는 이 시험은 처치 정의를 use로 두고
+    # build_tables를 실행한다(처치 정의는 2단계에서만 쓴다)
+    cfg = copy.deepcopy(synth_scan["cfg"])
+    cfg["treatment"]["definition"] = "use"
+    tables = synth_scan["s00"].build_tables(cfg, synth_scan["root"], synth_scan["s0_dir"])
+    # 처치 정의 use: 처치 공고 p02(기업 1000000001), p05(1000000003). 비교 공고는 네 단계를 통과한 공고
     # 가운데 엄격한 사전의 키워드, 생성형 AI 활용 표현, AI 에이전트 숙련이 모두 없는 p03 p12 p13 p16이다
-    # (p01, p09는 키워드, p11, p15는 생성형 AI 활용 표현에 걸려 어느 쪽도 아니다)
+    # (p01, p09는 키워드, p11, p15는 생성형 AI 활용 표현에 걸려 어느 쪽도 아니다).
+    # infra-2b 과제 1: 날짜를 받아 남는 p14, p17도 비교 공고여서 비교 공고 수를 4에서 6으로 바꿨다
     t16 = tables["t16_detail_by_arm"].set_index("arm")
-    assert t16.loc["처치 공고", "n"] == 2 and t16.loc["비교 공고", "n"] == 4
+    assert t16.loc["처치 공고", "n"] == 2 and t16.loc["비교 공고", "n"] == 6
     # AI 에이전트 숙련코드를 뺀 숙련 수: p02 2개(SM-01-0001, PLACEBO_CANDIDATE), p05 0개
     assert t16.loc["처치 공고", "n_skills_mean"] == pytest.approx(1.0)
     t17 = tables["t17_firm_treated"].set_index("key")["값"]
@@ -571,11 +587,16 @@ def test_t18_on_hand_built_postings():
 def test_t02d_date_source_by_period(tables, synth_data, tmp_path):
     t = tables["t02d_date_source_by_period"]
     assert list(t.columns) == ["period", "date_source", "n", "n_treated", "share_in_period", "treated_share_in_period"]
-    # 네 단계를 통과한 공고 10건 가운데 ID_END_ONLY(p13)만 마감일로 게시일을 정했다. 처치 공고 p02, p05는 게시일이 있다
-    assert t["period"].tolist() == [synth.PERIOD_NAME] * 2 and t["date_source"].tolist() == ["post_start", "post_end"]
-    assert t["n"].tolist() == [9, 1] and t["n_treated"].tolist() == [2, 0]
-    assert t["share_in_period"].tolist() == pytest.approx([0.9, 0.1])
-    assert t["treated_share_in_period"].tolist() == pytest.approx([1.0, 0.0])
+    # infra-2b 과제 1: 설정이 날짜를 채우고(결정 38) 처치 정의가 use_any(결정 40)여서 기대값을 바꿨다.
+    # 네 단계를 통과한 공고 12건 가운데 ID_END_ONLY(p13)는 마감일로 게시일을 정했고, ID_NO_DATE(p14)와
+    # ID_END_UNUSABLE(p17)은 앞 공고의 날짜를 받았다. use_any의 처치 공고 p02, p05(생성형 AI 활용 숙련),
+    # p11, p15(생성형 AI 활용 키워드)는 모두 게시일이 있다
+    # (바꾸기 전: 두 행, n [9, 1], n_treated [2, 0], share [0.9, 0.1], treated share [1.0, 0.0])
+    assert t["period"].tolist() == [synth.PERIOD_NAME] * 3
+    assert t["date_source"].tolist() == ["post_start", "post_end", "fill"]
+    assert t["n"].tolist() == [9, 1, 2] and t["n_treated"].tolist() == [4, 0, 0]
+    assert t["share_in_period"].tolist() == pytest.approx([9 / 12, 1 / 12, 2 / 12])
+    assert t["treated_share_in_period"].tolist() == pytest.approx([1.0, 0.0, 0.0])
     s00 = load_script()
     text = s00.write_report(tables, _NO_TIMING, synth_data["cfg"], tmp_path / "report.md", commit="c").read_text(
         encoding="utf-8")
@@ -645,3 +666,160 @@ def test_crosswalk_and_ksic_table_must_list_the_same_sub_classes(synth_scan):
     with pytest.raises(ValueError, match="862") as e:
         s00.build_tables(synth_scan["cfg"], root, synth_scan["s0_dir"])
     assert "999" in str(e.value)
+
+
+# 아래는 infra-2b 과제 1(결정 38~41)에서 더한 시험이다. 수치는 가상 자료의 것이다.
+
+@pytest.fixture
+def use_any_tables(synth_data, tmp_path):
+    """설정 그대로(처치 정의 use_any, 날짜를 채움) 두 공고의 본문만 바꿔 scan과 build_tables를 실행한다.
+
+    p01(개발 숙련 IT-05-0398)의 본문을 `ChatGPT 연동 개발`로 바꿔 엄격한 사전에는 걸리지 않고 생성형 AI 활용 키워드
+    사전에만 걸리게 한다(개발 숙련과 키워드가 함께 있는 공고). p17(두 날짜가 모두 없어 p16의 2025-09-01을 받는 공고)의
+    본문을 `생성형 AI 활용 보고서`로 바꿔 날짜를 받은 처치 공고를 만든다.
+    """
+    assert synth_data["cfg"]["treatment"]["definition"] == "use_any" and synth_data["cfg"]["period"]["fill"]["enabled"]
+    rewrite_postings(synth_data, post_start={}, region={},
+                     detail={"p01": "ChatGPT 연동 개발", synth.ID_END_UNUSABLE: "생성형 AI 활용 보고서"})
+    return run(synth_data, tmp_path)[1]
+
+
+def test_treated_and_control_under_use_any(use_any_tables):
+    # 네 단계를 통과한 공고 12건: p01 p02 p03 p05 p09 p11 p12 p13 p14 p15 p16 p17.
+    # use_any의 처치 공고: p01(개발 숙련과 키워드), p02 p05(생성형 AI 활용 숙련), p11 p15 p17(키워드만) = 6건.
+    # 비교 공고: p03 p12 p13 p14 p16 = 5건. p09는 엄격한 사전의 키워드(`multi-agent`)에 걸려 어느 쪽도 아니다.
+    a = use_any_tables["t02a_treated_by_period"]
+    assert list(a.columns[:5]) == ["unit", "period", "n", "n_treated", "n_control"]
+    q = a[a["unit"] == "quarter"].set_index("period")
+    assert q.index.tolist() == ["2025Q1", "2025Q2", "2025Q3", "2025Q4"]
+    assert q["n"].tolist() == [2, 1, 4, 5]                   # Q3: p05 p15 p16 p17(받은 날짜 09-01), Q4: p09 p11 p12 p13 p14
+    assert q["n_treated"].tolist() == [2, 0, 3, 1] and q["n_control"].tolist() == [0, 1, 1, 3]
+    assert q["kw_use"].tolist() == [1, 0, 2, 1] and q["has_use"].tolist() == [1, 0, 1, 0]
+    assert q["has_dev"].tolist() == [1, 0, 1, 0] and q["kw_strict"].tolist() == [0, 0, 0, 1]
+    p = a[a["unit"] == "period"].set_index("period").loc[synth.PERIOD_NAME]
+    assert (p["n"], p["n_treated"], p["n_control"], p["kw_use"], p["has_use"]) == (12, 6, 5, 4, 2)
+
+    c = use_any_tables["t02c_occ_group_treated"].set_index("keco2")
+    assert c.index.tolist() == ["02", "13"]
+    assert c["name"].tolist() == ["경영·행정·사무직", "정보통신 연구개발직 및 공학기술직"]
+    assert c["n"].tolist() == [5, 7]                         # 02: p02 p03 p09 p14 p15, 13: p01 p05 p11 p12 p13 p16 p17
+    assert c["n_treated"].tolist() == [2, 4] and c["n_control"].tolist() == [2, 3]
+    assert not c["meets_min"].any()
+
+    d = use_any_tables["t02d_date_source_by_period"]
+    assert d["date_source"].tolist() == ["post_start", "post_end", "fill"]
+    assert d["n"].tolist() == [9, 1, 2] and d["n_treated"].tolist() == [5, 0, 1]   # 날짜를 받은 처치 공고 p17
+    assert d["share_in_period"].tolist() == pytest.approx([9 / 12, 1 / 12, 2 / 12])
+    assert d["treated_share_in_period"].tolist() == pytest.approx([5 / 6, 0.0, 1 / 6])
+
+    e = use_any_tables["t02e_fill_gap_by_period"]
+    assert list(e.columns) == ["period", "gap_bin", "n", "n_treated", "share_in_period"]
+    assert e["period"].tolist() == [synth.PERIOD_NAME] * 6
+    assert e["gap_bin"].tolist() == ["7일 이내", "8~30일", "31~90일", "91~365일", "365일 초과", "뒤 날짜 없음"]
+    # p14: p13의 2025-12-20을 받고 뒤의 p15(2025-08-01)까지 141일. p17: 뒤에 날짜 있는 공고가 없다
+    assert e["n"].tolist() == [0, 0, 0, 1, 0, 1] and e["n_treated"].tolist() == [0, 0, 0, 0, 0, 1]
+    assert e["share_in_period"].tolist() == pytest.approx([0, 0, 0, 1 / 12, 0, 1 / 12])
+
+
+def test_use_definition_leaves_keyword_postings_out_of_both_groups(synth_data, tmp_path):
+    # 같은 공고를 처치 정의 use로 나누면 p01(개발 숙련), p11 p15 p17(키워드)은 처치 공고도 비교 공고도 아니다
+    rewrite_postings(synth_data, post_start={}, region={},
+                     detail={"p01": "ChatGPT 연동 개발", synth.ID_END_UNUSABLE: "생성형 AI 활용 보고서"})
+    synth_data["cfg"]["treatment"]["definition"] = "use"
+    t = run(synth_data, tmp_path)[1]
+    p = t["t02a_treated_by_period"].query("unit == 'period'").iloc[0]
+    assert (p["n"], p["n_treated"], p["n_control"]) == (12, 2, 5)
+    assert t["t02d_date_source_by_period"]["n_treated"].tolist() == [2, 0, 0]
+
+
+def test_t01d_date_fill_on_synthetic_postings(tables):
+    t = tables["t01d_date_fill"]
+    assert list(t.columns) == ["year", "source", "gap_bin", "n", "n_in_occ", "n_in_occ_in_period"]
+    # p14(잡사이트B, 141일), p17(잡사이트B, 뒤 날짜 없음)
+    assert t.values.tolist() == [[2025, "잡사이트B", "91~365일", 1, 1, 1], [2025, "잡사이트B", "뒤 날짜 없음", 1, 1, 1]]
+
+
+def test_t01d_sorts_sites_by_filled_postings():
+    s00 = load_script()
+    fill = pd.DataFrame({"year": [2025, 2025, 2025, 2024], "source": ["가", "나", "나", "다"],
+                         "gap_bin": ["7일 이내", "뒤 날짜 없음", "8~30일", "365일 초과"],
+                         "n": [1, 2, 3, 9], "n_in_occ": [1, 2, 3, 9], "n_in_occ_in_period": [1, 2, 3, 0]})
+    t = s00._t01d_date_fill(fill)
+    # 연도 순, 연도 안에서는 받은 공고가 많은 사이트(나 5건)부터, 사이트 안에서는 구간 순
+    assert t[["year", "source", "gap_bin"]].values.tolist() == [
+        [2024, "다", "365일 초과"], [2025, "나", "8~30일"], [2025, "나", "뒤 날짜 없음"], [2025, "가", "7일 이내"]]
+    assert s00.REPORT_MAX_ROWS_BY_TABLE["t01d_date_fill"] is None
+
+
+def test_max_gap_days_removes_far_filled_postings_in_the_report(synth_scan):
+    s00 = synth_scan["s00"]
+    cfg = copy.deepcopy(synth_scan["cfg"])
+    cfg["period"]["fill"]["max_gap_days"] = 100              # 2단계에서만 쓰므로 scan을 다시 하지 않는다
+    t = s00.build_tables(cfg, synth_scan["root"], synth_scan["s0_dir"])
+    one = t["t01_exclusions"].query("year == 2025")
+    assert one["step"].tolist() == ["in_period", "in_occ", "fill_gap", "has_bzno", "has_skill"]
+    # p14(141일)와 p17(뒤 날짜 없음)이 빠진다
+    assert one.set_index("step").loc["fill_gap", ["n_before", "n_dropped", "n_after"]].tolist() == [15, 2, 13]
+    assert t["t02d_date_source_by_period"]["n"].tolist() == [9, 1, 0]
+    assert t["t02e_fill_gap_by_period"]["n"].sum() == 0
+    assert "`period.fill.max_gap_days` = 100" in s00._table_notes(cfg)["t01_exclusions"]
+    # 값이 없으면 fill_gap 행이 없다
+    assert "fill_gap" not in set(s00.build_tables(synth_scan["cfg"], synth_scan["root"],
+                                                  synth_scan["s0_dir"])["t01_exclusions"]["step"])
+
+
+def test_report_without_fill_skips_the_fill_tables(synth_data, tmp_path):
+    synth_data["cfg"]["period"]["fill"]["enabled"] = False
+    s00, t = run(synth_data, tmp_path)
+    assert not set(s00.FILL_TABLES) & set(t)
+    assert not any((tmp_path / "s0" / "tables" / f"{n}.csv").exists() for n in s00.FILL_TABLES)
+    assert t["t02d_date_source_by_period"]["date_source"].tolist() == ["post_start", "post_end"]
+    text = s00.write_report(t, _NO_TIMING, synth_data["cfg"], tmp_path / "report.md", commit="c").read_text(encoding="utf-8")
+    for name in s00.FILL_TABLES:
+        assert f"`period.fill.enabled`가 false여서 날짜를 채우지 않았으므로 `{name}`은 만들지 않았다." in text
+        assert f"### `{name}`" not in text
+    assert "같은 연도 파일에서 행 순서로 가장 가까운 앞 공고의 날짜" not in s00._table_notes(synth_data["cfg"])["t02d_date_source_by_period"]
+
+
+def test_report_states_the_configured_definition_and_fill(tables, synth_data, tmp_path):
+    s00 = load_script()
+    cfg = synth_data["cfg"]
+    text = s00.write_report(tables, _NO_TIMING, cfg, tmp_path / "report.md", commit="c").read_text(encoding="utf-8")
+    head = text[:text.index("## 1.")]
+    assert ("처치 정의(`treatment.definition`): `use_any`. 생성형 AI 활용 숙련(숙련코드)이 있거나 본문이 생성형 AI "
+            "활용 키워드 사전(`treatment.keywords.use`)에 걸린 공고를 처치 공고로 본다.") in head
+    assert "비교 공고는 어떤 처치 정의에서도 같다" in head and "결정 41" in head
+    assert "두 날짜가 모두 없으면 같은 연도 파일에서 행 순서로 가장 가까운 앞 공고의 날짜를 쓴다" in head
+    # 생성형 AI 활용 처치를 숙련코드만으로 정한다고 읽힐 문장이 없다
+    assert "생성형 AI 활용 처치 정의의 처치 공고" not in text
+    assert "처치 정의를 생성형 AI 활용(`use`)으로" not in text
+    sec1, sec2 = text[text.index("## 1. "):text.index("## 2. ")], text[text.index("## 2. "):text.index("## 3. ")]
+    assert "### `t01d_date_fill`" in sec1 and sec1.index("### `t01c_post_end_gap`") < sec1.index("### `t01d_date_fill`")
+    assert sec2.index("### `t02d_date_source_by_period`") < sec2.index("### `t02e_fill_gap_by_period`")
+    notes = s00._table_notes(cfg)
+    assert ("두 날짜가 모두 없는 공고는 같은 연도 파일에서 행 순서로 가장 가까운 앞 공고의 날짜를 받는다"
+            in notes["t01b_post_start_missing"])
+    assert "n_in_occ_fill_dates" in notes["t01b_post_start_missing"] and "n_filled <= n_no_date" in notes["t01b_post_start_missing"]
+    assert ("앞뒤 날짜의 간격은 날짜를 채운 공고의 바로 앞과 바로 뒤에 있는 날짜 있는 공고 사이의 일수이다. 간격이 짧으면 "
+            "채운 날짜가 실제 게시일과 가까울 가능성이 높고, 간격이 길거나 뒤에 날짜가 없으면 한 수집 사이트의 공고가 날짜 "
+            "없이 길게 이어진 구간이어서 채운 날짜가 실제 게시일과 다를 수 있다.") in notes["t01d_date_fill"]
+    assert "`fill`은 두 날짜가 모두 없어" in notes["t02d_date_source_by_period"]
+    assert "period.fill.max_gap_days" in notes["t02e_fill_gap_by_period"]
+    for name in ("t02a_treated_by_period", "t02c_occ_group_treated", "t02e_fill_gap_by_period", "t16_detail_by_arm"):
+        assert "`use_any`" in notes[name]
+    for name in ("t04_bzno_ked_by_treatment", "t05_source", "t15_aiie_coverage"):
+        assert "숙련코드)이 있는지만 본 표시" in notes[name]
+    assert "설정의 처치 정의와 다르므로" in notes["t03b_sparse_filter_grid"]
+    assert set(s00.DEFINITION_TEXT) == set(treatment.DEFINITIONS)
+
+
+def test_t10b_marks_the_occupations_removed_by_decision_39():
+    import paths
+    s00 = load_script()
+    cfg = paths.load_config()
+    removed = ["2143", "2151", "4154", "4155", "4166"]
+    codes = list(cfg["occupations"]["keco4"]) + removed + ["0122"]
+    occ = pd.DataFrame({"year": 2025, "keco4": codes, "n": 100, "n_skill": 100, "n_use": 40, "n_dev": 0})
+    t = s00._t10b_occ_list_check(occ, cfg).set_index("keco4")
+    assert (t.loc[removed + ["0122"], "status"] == "설정에서 뺀 중분류").all()
+    assert (t.loc[cfg["occupations"]["keco4"], "status"] == "양쪽에 있음").all() and len(t) == 26

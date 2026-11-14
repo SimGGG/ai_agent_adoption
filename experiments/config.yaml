@@ -14,18 +14,20 @@ period:                                    # 결정 23, 24, 25
   end: "2026-08-31"
   unit: year
   date_columns: [post_start, post_end]     # 앞의 열이 비어 있으면 다음 열을 게시일로 쓴다
+  fill:                                    # 결정 38
+    enabled: true                          # 두 날짜가 모두 없는 공고에 같은 파일의 바로 앞 공고 날짜를 쓴다
+    max_gap_days: null                     # 값을 주면, 날짜를 채운 공고 가운데 앞뒤 날짜의 간격이 이 일수보다 크거나 뒤에 날짜가 없는 공고를 분석 기간 단계에서 뺀다
   groups:
     - {name: "초기", years: [2023, 2024]}
     - {name: "1 도입기", years: [2025]}
     - {name: "2 도입기", years: [2026]}
 
-occupations:                               # 결정 20, 26, 27
+occupations:                               # 결정 20, 26, 27, 39
   min_use_postings: 30
-  exclude_keco2: ["01", "61"]
+  exclude_keco2: ["01", "61", "21", "41"]  # 결정 39: 교육직(21), 예술·디자인·방송직(41)도 뺀다
   group_min_treated: 100
   keco4: ["0241", "0243", "0261", "0262", "0265", "0271", "0272", "0284", "0292", "0295",
-          "0299", "1320", "1331", "1332", "1333", "1339", "1342", "1351", "1352", "1361",
-          "2143", "2151", "4154", "4155", "4166"]
+          "0299", "1320", "1331", "1332", "1333", "1339", "1342", "1351", "1352", "1361"]
 
 industry:
   not_in_table: missing                    # 결정 28. category | missing
@@ -45,19 +47,36 @@ treatment:
                   'Claude', '클로드', 'Codex', '코덱스', 'Ollama', '올라마', 'Gemini', '제미나이',
                   'Deep\s*seek', '딥\s*시크', 'sub[- ]?agent', '서브\s*에이전트']
     exclude: ['보험\s*에이전트', '여행\s*에이전[트시]', '부동산\s*에이전트', '스포츠\s*에이전트', '에이전시']
-    # 생성형 AI 활용 표현(결정 36). 걸린 공고는 비교 공고에서 뺀다
-    use: ['Chat\s*GPT', '챗\s*GPT', '챗\s*지피티', 'GPT', '생성형\s*AI', '생성형\s*인공지능', '생성\s*AI', 'Generative\s*AI',
+    # 생성형 AI 활용 표현(결정 36, 41). 걸린 공고는 처치 정의 `use_any`에서 처치 공고이고, 어떤 정의에서도 비교 공고가 아니다
+    use: [
+          # 일반 표현
+          'Chat\s*GPT', '챗\s*GPT', '챗\s*지피티', 'GPT', '생성형\s*AI', '생성형\s*인공지능', '생성\s*AI', 'Generative\s*AI',
           '(?<![A-Za-z])Gen\s?AI', '프롬프트\s*엔지니어', '프롬프트\s*(?:작성|설계|활용|디자인)', 'prompt\s*engineer',
           '(?<![A-Za-z])LLMs?(?![A-Za-z])', '대규모\s*언어\s*모델', '거대\s*언어\s*모델', '초거대\s*AI',
           'Copilot', '코파일럿', 'Midjourney', '미드저니', 'Stable\s*Diffusion', '스테이블\s*디퓨전',
           'Claude', 'Gemini', '제미나이', 'Perplexity', '퍼플렉시티', '뤼튼', 'HyperCLOVA', '하이퍼클로바', '클로바\s*X',
-          'Notion\s*AI|노션\s*AI', '(?<![A-Za-z])AI\s*(?:툴|도구)', '(?<![A-Za-z])AI\s*활용']
+          'Notion\s*AI|노션\s*AI', '(?<![A-Za-z])AI\s*(?:툴|도구)', '(?<![A-Za-z])AI\s*활용',
+          # 결정 41에서 더한 표현: 대화형 서비스와 언어 모형
+          '(?<![A-Za-z])sLLM(?![A-Za-z])', '클로드', '(?<![A-Za-z])Codex(?![A-Za-z])(?!\s*(?:Alimentarius|규격|기준|위원회))',
+          '코덱스(?!\s*(?:규격|기준|위원회))', 'Deep\s*Seek', '딥\s*시크', '(?<![A-Za-z])Grok(?![A-Za-z])', '그록',
+          '(?<![A-Za-z])Llama(?![A-Za-z])', 'Mistral|미스트랄', '(?<![A-Za-z])Qwen', 'Google\s*Bard|구글\s*바드',
+          'Bing\s*(?:Chat|AI)|빙\s*챗', 'NotebookLM|노트북\s*LM', 'Genspark|젠스파크', 'Manus\s*AI|마누스',
+          # 국내 서비스와 모형
+          '(?<![A-Za-z])wrtn(?![A-Za-z])', '에이닷(?!컴)', '(?<![A-Za-z])Kanana|카나나', 'EXAONE|엑사원', 'CLOVA\s*X',
+          # 이미지·영상·음성 생성
+          '(?<![A-Za-z])DALL[-·\s]?E(?![A-Za-z])', '(?<![A-Za-z])Firefly(?![A-Za-z])|파이어플라이', 'ComfyUI|컴피\s*UI',
+          'Nano\s*Banana|나노\s*바나나', '(?<![A-Za-z])Sora(?![A-Za-z])', '(?<![A-Za-z])Veo\s?\d',
+          '(?<![A-Za-z])Kling(?![A-Za-z])|(?<![가-힣])클링\s*AI', 'Runway\s*(?:ML|Gen|AI)|런웨이\s*(?:ML|AI)',
+          'Pika\s*(?:Labs|AI)|피카\s*랩스', 'Higgsfield|힉스필드', '(?<![A-Za-z])Suno(?![A-Za-z])|수노\s*AI',
+          'ElevenLabs|일레븐\s*랩스', '(?<![A-Za-z])Vrew(?![A-Za-z])', '(?<![A-Za-z])Gamma\s*AI|감마\s*AI',
+          # 코드 작성 도구
+          'Cursor\s*(?:AI|IDE)|커서\s*AI', 'Windsurf(?!ing)|윈드서프']
   agent_skills:              # 결정 13, 19
     v31_prefix: "IT-06-012-"
     use_suffix: "활용하기"
     move_to_dev: ["IT-05-0382", "IT-05-0413", "IT-05-0414", "IT-05-0420", "IT-05-0421"]
     move_to_use: ["IT-05-0396"]
-  definition: use            # 6.7절 11번 기본값(결정 33). all | dev | use | keyword | code | use_keyword | use_any
+  definition: use_any        # 결정 40. all | dev | use | keyword | code | use_keyword | use_any
   keyword_dictionary: strict
 
 skills:
