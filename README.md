@@ -106,7 +106,7 @@ PYTHONNOUSERSITE=1 PYTHONUTF8=1 "$(conda info --base)/envs/aabundle/python.exe" 
 - `report`: 중간 자료와 함께 숙련 설명 파일, 직종 분류표(`KECO2025.xlsx`), KED 기업 자료(`ked.extract_ked_firm`으로 줄 수와 기업 수를 센다), 산업별 AI 노출 지수의 외부 자료 세 파일(아래 "외부 자료")을 읽어 집계표(CSV)를 `experiments/outputs/s0/tables/`에 쓰고, 결과모형(공고의 특성으로 그 숙련이 공고에 들어 있을 확률을 예측하는 모형) 한 번의 학습 시간을 잰 뒤 `docs/s0-data-audit.md`를 쓴다. 먼저 `scan_meta.json`의 설정 값과 지금 `config.yaml`을 비교해, 다른 항목이 있으면 그 항목을 모두 적고 멈춘다.
 - `all`: `scan` 다음에 `report`를 실행한다.
 
-게시일은 `post_start`이고, 없으면 `post_end`를 쓴다. 두 날짜가 모두 없는 공고는 같은 연도 파일에서 행 순서로 가장 가까운 앞 공고의 날짜를 받는다(`period.fill.enabled`, 결정 38). `scan`은 이를 위해 연도 파일마다 날짜 열만 파일 전체에서 먼저 읽는다. 날짜를 받은 공고는 `base`의 `date_source`가 `fill`이고, 바로 앞과 바로 뒤의 날짜 있는 공고 사이의 일수가 `fill_gap_days`에 있다. `date_fill`은 날짜를 받은 공고를 파일 연도 × 수집 사이트 × 그 일수의 구간별로 센 표이며, 보고서의 `t01d_date_fill`과 `t02e_fill_gap_by_period`(날짜를 받은 공고의 기간 × 구간별 수)가 이 내용을 싣는다. `period.fill.enabled`가 false이면 두 표는 만들지 않는다.
+게시일은 `post_start`이고, 없으면 `post_end`를 쓴다. 두 날짜가 모두 없는 공고는 같은 연도 파일에서 행 순서로 가장 가까운 앞 공고의 날짜를 받는다(`period.fill.enabled`, 결정 38). `scan`은 이를 위해 연도 파일마다 날짜 열만 파일 전체에서 먼저 읽는다. 날짜를 채운 공고는 `base`의 `date_source`가 `fill`이고, 바로 앞과 바로 뒤의 날짜 있는 공고 사이의 일수가 `fill_gap_days`에 있다. `date_fill`은 날짜를 채운 공고를 파일 연도 × 수집 사이트 × 그 일수의 구간별로 센 표이며, 보고서의 `t01d_date_fill`과 `t02e_fill_gap_by_period`(날짜를 채운 공고의 기간 × 구간별 수)가 이 내용을 싣는다. `period.fill.enabled`가 false이면 두 표는 만들지 않는다.
 
 보고서에서 처치 공고와 비교 공고를 나누는 표(기간별·직종군별 처치 공고 수, 희소 필터, 사업자번호와 KED 결합 비율, 수집 사이트와 산업 소분류별 처치 공고, 인접 숙련과 placebo 숙련 후보, 산업별 AI 노출 지수, 처치 여부별 숙련 수와 기업별 집계)는 모두 설정의 처치 정의(`treatment.definition`, 기본값 `use_any`)를 따른다. 희소 필터는 처치 공고와 비교 공고만으로 센다. 처치 정의는 `report`만 다시 실행하면 바뀐다.
 

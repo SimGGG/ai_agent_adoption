@@ -235,8 +235,10 @@ def test_scan_reads_a_configured_date_column_outside_the_raw_columns(synth_data,
 # p01 없음(파일의 첫 행이어서 받을 날짜가 없다), p05 없음(앞의 p04 2025-04-11을 받고 뒤의 p06 2025-07-02까지 82일),
 # p08 2024-12-31(마감일, 분석 기간 밖), p09 없음(p08의 2024-12-31을 받아 분석 기간 밖, 뒤의 p10 2025-10-02까지 275일),
 # p11 없음(앞 행 묶음의 p10 2025-10-02를 받고 뒤의 p12 2025-11-02까지 31일)이다. 원래 날짜가 없는 p14는 p13의
-# 2025-12-20을 받고 뒤의 p15 2025-08-01까지 141일, p17은 p16의 2025-09-01을 받고 뒤에 날짜가 없다.
-FILL_POST_START = {"p01": None, "p05": None, "p08": None, "p09": None, "p11": None}
+# 2025-12-20을 받고 뒤의 p15 2025-08-01까지 141일이다. 수정 2차에서 p16의 게시일을 2025-12-20으로 바꿔, p17이 p14와
+# 같은 날짜(2025-12-20)를 다른 행 묶음에서 받게 했다(뒤에 날짜가 없다). p14, p17은 둘 다 잡사이트B이므로, 행 묶음마다
+# 서로 다른 날짜를 센 뒤 더하면 잡사이트B의 `n_in_occ_fill_dates`가 4가 되고, 파일 전체에서 세면 3이다.
+FILL_POST_START = {"p01": None, "p05": None, "p08": None, "p09": None, "p11": None, "p16": dt.date(2025, 12, 20)}
 FILL_POST_END = {"p01": None, "p05": None, "p08": dt.date(2024, 12, 31), "p09": None, "p11": None}
 
 
@@ -253,7 +255,9 @@ def test_scan_fills_dates_across_row_groups(synth_data, tmp_path, s00):
     assert "p01" not in base.index and "p09" not in base.index      # 받을 날짜가 없음 / 받은 날짜가 분석 기간 밖
     filled = base[base["date_source"] == "fill"]
     assert filled.index.tolist() == ["p05", "p11", "p14", "p17"]
-    assert filled["year"].tolist() == [2025] * 4 and filled["month"].tolist() == [4, 10, 12, 9]
+    # 수정 2차: p17의 달을 9에서 12로 바꿨다(p16의 게시일을 바꿨다)
+    assert filled["year"].tolist() == [2025] * 4 and filled["month"].tolist() == [4, 10, 12, 12]
+    assert filled.loc["p14", "date_source"] == filled.loc["p17", "date_source"] == "fill"
     assert filled["fill_gap_days"].iloc[:3].tolist() == [82, 31, 141] and pd.isna(filled["fill_gap_days"].iloc[3])
     assert base.loc[base["date_source"] != "fill", "fill_gap_days"].isna().all()
     assert base.loc["p13", "date_source"] == "post_end"
@@ -262,7 +266,9 @@ def test_scan_fills_dates_across_row_groups(synth_data, tmp_path, s00):
     new = ["n_no_date", "n_filled", "n_in_occ_filled", "n_in_occ_filled_in_period", "n_in_occ_fill_dates",
            "n_in_occ_use_filled_in_period"]
     assert m.loc["잡사이트A", new].tolist() == [1, 0, 0, 0, 0, 0]        # p01
-    assert m.loc["잡사이트B", new].tolist() == [4, 4, 4, 4, 4, 1]        # p05(생성형 AI 활용 숙련), p11, p14, p17
+    # p05(생성형 AI 활용 숙련), p11, p14, p17. 채운 날짜는 04-11, 10-02, 12-20(p14와 p17, 행 묶음 2와 3)의 세 가지이다
+    # (수정 2차에서 4에서 3으로 바꿨다. 행 묶음마다 센 값을 더하면 1 + 2 + 1 = 4가 되어 이 단언에 걸린다)
+    assert m.loc["잡사이트B", new].tolist() == [4, 4, 4, 4, 3, 1]
     assert m.loc["잡사이트C", new].tolist() == [1, 1, 1, 0, 1, 0]        # p09
     assert m["n_filled"].sum() == 5 <= m["n_no_date"].sum() == 6        # 차이는 파일의 첫 행 p01
 

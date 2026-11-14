@@ -234,7 +234,8 @@ def _post_start_counts(raw: pd.DataFrame, b: pd.DataFrame, has_use: np.ndarray,
     설정 `period.date_columns`이다. 세는 공고는 다음과 같다(`n_in_occ_*`는 그 가운데 분석 대상 세분류의 공고,
     `n_in_occ_use_*`는 다시 그 가운데 생성형 AI 활용 숙련이 있는 공고).
     - `no_post_start`: 첫 날짜 열에 게시일로 쓸 날짜가 없는 공고(비었거나 읽을 수 없는 값)
-    - `no_date`: `date_columns`의 어느 열에도 게시일로 쓸 날짜가 없는 공고(분석 기간 단계에서 빠진다)
+    - `no_date`: `date_columns`의 어느 열에도 게시일로 쓸 날짜가 없는 공고(날짜를 채우지 않는 설정에서는 분석 기간
+      단계에서 빠진다. 채우는 설정에서는 그 가운데 파일에서 앞에 날짜 있는 공고가 없어 채울 날짜가 없는 공고만 빠진다)
     - `end_unusable`: 첫 날짜 열에 날짜가 없고, 둘째 날짜 열에 값은 있지만 날짜로 쓸 수 없는 공고
       (`sample.unusable_dates`. 날짜 열이 하나뿐이면 0)
     - `from_end_in_period`: 첫 날짜 열에 날짜가 없어 뒤 열의 날짜를 게시일로 썼고, 그 날짜가 분석 기간 안인 공고
@@ -478,7 +479,8 @@ def scan(cfg: dict, root: Path, out_dir: Path) -> dict:
                 }).groupby(["year", "keco4"], as_index=False).sum())
 
                 in_occ = b["in_occ"].to_numpy(dtype=bool)
-                # 모든 공고: 게시일과 관련된 공고 수(게시일을 정할 수 없는 공고는 분석 기간 단계에서 빠진다)
+                # 모든 공고: 게시일과 관련된 공고 수(게시일을 정할 수 없는 공고는 분석 기간 단계에서 빠진다. 날짜를
+                # 채우는 설정에서는 파일에서 앞에 날짜 있는 공고가 없어 채울 날짜가 없는 공고만 빠진다)
                 psm_year.append(_post_start_counts(raw, b, flags["has_use"].to_numpy(dtype=bool), date_cols))
                 # 날짜를 채운 공고: 간격 구간별 공고 수와, 분석 대상 세분류에서 수집 사이트별로 받은 날짜
                 if fill_on:
@@ -1615,12 +1617,12 @@ def time_outcome_model(base: pd.DataFrame, treat: pd.DataFrame, long: pd.DataFra
     # 숙련 긴 표는 공고 번호 대신 base에서의 위치로 다루고, 제외 규칙을 통과한 공고의 행만 남긴다.
     # 희소 필터의 대상은 t03b_sparse_filter_grid와 같은 함수로 정한다.
     pos = _positions(long["posting_id"], base["posting_id"])
-    lk, alive_idx, arm = _sparse_filter_sample(alive, treat, pos, long["skill_code"], cfg)
+    lk, sample_idx, arm = _sparse_filter_sample(alive, treat, pos, long["skill_code"], cfg)
     is_treated = arm == 1
     is_comparison = arm == 0
     if lk.empty:
         return out
-    kept_codes = skills.sparse_filter(lk, set(alive_idx[is_treated].tolist()), len(alive_idx),
+    kept_codes = skills.sparse_filter(lk, set(sample_idx[is_treated].tolist()), len(sample_idx),
                                       sf["min_rate"], sf["min_treated"])
     out["n_skills_kept"] = len(kept_codes)
     n_by_code = lk.groupby("skill_code", observed=True)["posting_id"].nunique()
@@ -1630,7 +1632,7 @@ def time_outcome_model(base: pd.DataFrame, treat: pd.DataFrame, long: pd.DataFra
     top = str(n_by_code.index[0])
     out["skill_code"] = top
 
-    model_rows = alive_idx[is_treated | is_comparison]
+    model_rows = sample_idx[is_treated | is_comparison]
     model_is_comparison = is_comparison[is_treated | is_comparison]
     bzno = base["bzno"].astype("string").iloc[model_rows]
     groups = bzno.fillna(base["posting_id"].astype("string").iloc[model_rows]).to_numpy()
@@ -1663,12 +1665,12 @@ def time_outcome_model(base: pd.DataFrame, treat: pd.DataFrame, long: pd.DataFra
 REPORT_SECTIONS = [
     (1, "제외 규칙 단계별 공고 수 (연도별): 분석 기간, 분석 대상 직종 한정, 사업자번호 없음, 숙련 없음. 게시일이 없는 "
         "공고 가운데 마감일로 게시일을 대신한 공고 수와 둘 다 없는 공고 수, 게시일과 마감일이 모두 있는 공고의 두 날짜 "
-        "간격 분포, 두 날짜가 모두 없어 같은 연도 파일의 앞 공고 날짜를 받은 공고의 앞뒤 날짜 간격 분포",
+        "간격 분포, 두 날짜가 모두 없어 날짜를 채운 공고(같은 연도 파일의 앞 공고 날짜)의 앞뒤 날짜 간격 분포",
      ["t01_exclusions", "t01b_post_start_missing", "t01c_post_end_gap", "t01d_date_fill"]),
     (2, "기간별 처치 공고 수 (분기·반기·연 단위): 설정의 처치 정의로 나눈 처치 공고와 비교 공고, 키워드(엄격한 사전, "
         "넓은 사전), 개발 숙련, 생성형 AI 활용 숙련, 숙련코드 전체, 키워드와 숙련코드를 합친 것 각각과, 생성형 AI 활용 "
         "키워드 사전에 걸린 공고(`kw_use`). 분석 대상 세분류별·중분류별 처치 공고 수(처치 정의별). 기간별로 게시일을 "
-        "가져온 곳별 공고 수와 날짜를 받은 공고의 앞뒤 날짜 간격별 공고 수",
+        "가져온 곳별 공고 수와 날짜를 채운 공고의 앞뒤 날짜 간격별 공고 수",
      ["t02a_treated_by_period", "t02b_treated_by_occ", "t02c_occ_group_treated", "t02d_date_source_by_period",
       "t02e_fill_gap_by_period"]),
     (3, "공고당 숙련 수의 분포와 숙련별 출현율 (희소 필터 기준별 남는 숙련 수), 숙련 열별 숙련 수, "
@@ -1761,6 +1763,8 @@ DEFINITION_TEXT = {
                "걸린 공고를 처치 공고로 본다.",
 }
 assert set(DEFINITION_TEXT) == set(treatment.DEFINITIONS)
+
+
 def _arm_note(cfg: dict) -> str:
     """처치 공고와 비교 공고를 나누는 표의 설명에 넣는 한 문장. 설정의 처치 정의 값을 적는다."""
     return f"처치 공고와 비교 공고는 설정의 처치 정의(`treatment.definition` = `{cfg['treatment']['definition']}`)를 따른다."
@@ -1768,7 +1772,7 @@ def _arm_note(cfg: dict) -> str:
 
 _COMPARISON_TEXT = ("비교 공고는 어떤 처치 정의에서도 같다: 본문이 AI 에이전트 키워드 사전(`treatment.keyword_dictionary`로 "
                     "고른 사전)과 생성형 AI 활용 키워드 사전에 모두 걸리지 않고 AI 에이전트 숙련코드도 없는 공고이다.")
-_TREAT_ALL_NOTE =("`treat_all`은 숙련코드 처치(`treat_code`)와 엄격한 사전의 키워드 처치(`kw_strict`)를 합친 것이며, "
+_TREAT_ALL_NOTE = ("`treat_all`은 숙련코드 처치(`treat_code`)와 엄격한 사전의 키워드 처치(`kw_strict`)를 합친 것이며, "
                    "`treatment.keyword_dictionary`를 무엇으로 정해도 엄격한 사전을 쓴다.")
 _KW_USE_NOTE = ("`kw_use`는 생성형 AI 활용 키워드 사전(`treatment.keywords.use`)에 걸린 공고를 표시한다. 이 표시만 "
                 "있는 공고는 처치 정의가 `use_keyword`나 `use_any`일 때 처치 공고이고, 나머지 정의에서는 처치 공고에도 "
@@ -1794,9 +1798,9 @@ def _table_notes(cfg: dict) -> dict[str, str]:
                  "(`period.fill.enabled`, 설계 문서 결정 38). ")
     if fill_on:
         no_date_text = ("`in_period` 단계에서는 게시일이 분석 기간 밖인 공고와, 두 날짜가 모두 없고 파일에서 그 앞에 날짜 "
-                        "있는 공고가 없어 날짜를 받지 못한 공고가 함께 빠진다. ")
+                        "있는 공고가 없어 날짜를 채우지 못한 공고가 함께 빠진다. ")
         base_missing = ("두 날짜가 모두 없는 공고는 같은 연도 파일에서 행 순서로 가장 가까운 앞 공고의 날짜를 받는다. 받을 "
-                        "날짜가 없는 공고와 게시일(마감일, 받은 날짜 포함)이 분석 기간 밖인 공고는 `in_period` 단계에서 "
+                        "날짜가 없는 공고와 게시일(마감일, 채운 날짜 포함)이 분석 기간 밖인 공고는 `in_period` 단계에서 "
                         "빠지므로 `base.parquet`에 없다. ")
     else:
         no_date_text = ("`in_period` 단계에서는 게시일이 분석 기간 밖인 공고와, `post_start`와 `post_end`가 모두 날짜로 "
@@ -1804,8 +1808,8 @@ def _table_notes(cfg: dict) -> dict[str, str]:
         base_missing = ("게시일도 마감일도 쓸 수 없는 공고와 마감일로 정한 게시일이 분석 기간 밖인 공고는 `in_period` "
                         "단계에서 빠지므로 `base.parquet`에 없다. ")
     gap_rule = (f"설정 `period.fill.max_gap_days` = {max_gap}이어서, `step` = `fill_gap` 행은 " + _BASE_NOTE + " 가운데 "
-                "날짜를 받았지만 앞뒤 날짜의 간격이 이 일수보다 크거나 뒤에 날짜 있는 공고가 없어 분석 기간 단계에서 빠진 "
-                "공고를 센다(`year`는 받은 날짜의 연도). " if max_gap is not None else "")
+                "날짜를 채웠지만 앞뒤 날짜의 간격이 이 일수보다 크거나 뒤에 날짜 있는 공고가 없어 분석 기간 단계에서 빠진 "
+                "공고를 센다(`year`는 채운 날짜의 연도). " if max_gap is not None else "")
     arm_note = _arm_note(cfg)
     # 사업자번호와 숙련 제외 전의 공고(base.parquet)를 처치 정의로 나눈 표(t04, t05, t09a)의 설명
     base_arm_note = (arm_note + " 이 표는 사업자번호와 숙련 제외 전의 공고에 처치 정의를 적용했으므로, 사업자번호가 "
@@ -1814,13 +1818,15 @@ def _table_notes(cfg: dict) -> dict[str, str]:
         "t01_exclusions": (
             "`in_period`, `in_occ` 두 단계는 `scan_stats.parquet`(공고 파일의 모든 공고)에서 왔고 `year`는 공고 파일의 "
             "연도이다. `has_bzno`, `has_skill` 두 단계는 " + _BASE_NOTE + "에 `sample.apply_exclusions`를 적용한 것이고 "
-            "`year`는 게시일(`post_start`, 없으면 `post_end`" + (", 둘 다 없으면 받은 날짜" if fill_on else "")
+            "`year`는 게시일(`post_start`, 없으면 `post_end`" + (", 둘 다 없으면 채운 날짜" if fill_on else "")
             + ")의 연도이다. 두 연도 기준이 다르므로, 같은 `year` 행이라도 "
             "`in_occ`의 `n_after`와 `has_bzno`의 `n_before`는 같지 않을 수 있다. 게시일은 `post_start`이고, "
             "게시일(`post_start`)을 날짜로 쓸 수 없으면 마감일(`post_end`)을 게시일로 쓴다. "
             + (fill_rule if fill_on else "") + no_date_text + gap_rule
-            + "게시일을 정할 수 없는 공고의 수, 마감일로 게시일을 정한 공고의 수"
-            + (", 앞 공고의 날짜를 받은 공고의 수" if fill_on else "") + "는 `t01b_post_start_missing`에 있다."),
+            + ("마감일로 게시일을 정한 공고의 수와 날짜를 채운 공고의 수(`n_filled`)는 `t01b_post_start_missing`에 "
+               "있다. 그 표의 `n_no_date`는 날짜를 채우기 전의 수이므로, 게시일을 정할 수 없어 `in_period` 단계에서 "
+               "실제로 빠진 공고의 수는 `n_no_date − n_filled`이다." if fill_on else
+               "게시일을 정할 수 없는 공고의 수와 마감일로 게시일을 정한 공고의 수는 `t01b_post_start_missing`에 있다.")),
         "t01b_post_start_missing": (
             "대상: 공고 파일의 모든 공고. `year`는 공고 파일의 연도이다. 게시일이 없으면 마감일을 게시일로 쓴다. "
             + base_missing +
@@ -1829,7 +1835,7 @@ def _table_notes(cfg: dict) -> dict[str, str]:
             "그런 값이 없는 파일에서는 `post_start`가 빈 공고 수와 같다). `n_no_date`는 그 가운데 마감일(`post_end`)도 "
             "날짜로 쓸 수 없어 공고 자신의 날짜 열로는 게시일을 정할 수 없는 공고 수이고, `n_end_unusable`은 다시 그 "
             "가운데 마감일 칸에 값은 있으나 날짜로 쓸 수 없는 공고 수(예: `9999-12-31`)이다. `n_filled`는 `n_no_date` "
-            "가운데 같은 연도 파일에서 행 순서로 가장 가까운 앞 공고의 날짜를 받은 공고 수이다(`n_filled <= n_no_date`. "
+            "가운데 같은 연도 파일에서 행 순서로 가장 가까운 앞 공고의 날짜로 날짜를 채운 공고 수이다(`n_filled <= n_no_date`. "
             "차이는 파일의 첫 날짜 있는 공고보다 앞에 있어 받을 날짜가 없는 공고이다. 날짜를 채우지 않는 설정에서는 0). "
             "`n_in_occ`는 게시일과 관계없이 분석 대상 세분류"
             "(`occupations.keco4`)에 드는 공고 수이고, `n_in_occ_no_post_start`, `n_in_occ_no_date`, "
@@ -1837,10 +1843,10 @@ def _table_notes(cfg: dict) -> dict[str, str]:
             "분석 대상 세분류의 공고 가운데 게시일이 없어 마감일을 게시일로 썼고 그 날짜가 분석 기간 안이어서 남는 공고 "
             "수이다. 게시일을 마감일로 대신했지만 그 날짜가 분석 기간 밖이어서 빠진 공고 수는 "
             "`n_in_occ_no_post_start − n_in_occ_no_date − n_in_occ_from_end_in_period`이다. `n_in_occ_filled`는 "
-            "분석 대상 세분류의 공고 가운데 앞 공고의 날짜를 받은 공고 수, `n_in_occ_filled_in_period`는 그 가운데 받은 "
-            "날짜가 분석 기간 안인 공고 수이다. `n_in_occ_fill_dates`는 날짜를 받은 분석 대상 세분류 공고가 받은 서로 "
+            "분석 대상 세분류의 공고 가운데 날짜를 채운 공고 수, `n_in_occ_filled_in_period`는 그 가운데 채운 "
+            "날짜가 분석 기간 안인 공고 수이다. `n_in_occ_fill_dates`는 날짜를 채운 분석 대상 세분류 공고에 채운 서로 "
             "다른 날짜의 수이다. 이 값이 `n_in_occ_filled`보다 훨씬 작으면, 그 수집 사이트의 공고가 날짜 없이 길게 "
-            "이어져 많은 공고가 같은 몇 개의 날짜를 받았다는 뜻이다(연도 행의 값은 사이트별 값의 합이다). "
+            "이어져 많은 공고에 같은 몇 개의 날짜를 채웠다는 뜻이다(연도 행의 값은 사이트별 값의 합이다). "
             "`n_in_occ_use`는 분석 대상 세분류에 들고 생성형 AI 활용 숙련이 있는 공고 수이고, "
             "`n_in_occ_use_no_post_start`, `n_in_occ_use_no_date`, `n_in_occ_use_from_end_in_period`, "
             "`n_in_occ_use_filled_in_period`는 그 가운데 같은 경우의 공고 수이다. `no_date_rate`는 `n_no_date / n_raw`, "
@@ -1854,13 +1860,13 @@ def _table_notes(cfg: dict) -> dict[str, str]:
             "쓸 수 없는 공고(예: `9999-12-31`)는 이 표에 없다. 그 가운데 게시일도 없는 분석 대상 세분류의 공고 수는 "
             "`t01b_post_start_missing`의 `n_in_occ_end_unusable`에 있다."),
         "t01d_date_fill": (
-            "대상: 공고 파일의 공고 가운데 날짜를 받은 공고(분석 기간과 관계없이). 두 날짜가 모두 없는 공고는 같은 연도 "
+            "대상: 공고 파일의 공고 가운데 날짜를 채운 공고(분석 기간과 관계없이). 두 날짜가 모두 없는 공고는 같은 연도 "
             "파일에서 행 순서로 가장 가까운 앞 공고의 날짜를 받는다. `year`는 공고 파일의 연도이다. `gap_bin`은 앞뒤 "
             "날짜의 간격의 구간이다. 앞뒤 날짜의 간격은 날짜를 채운 공고의 바로 앞과 바로 뒤에 있는 날짜 있는 공고 사이의 "
             "일수이다. 간격이 짧으면 채운 날짜가 실제 게시일과 가까울 가능성이 높고, 간격이 길거나 뒤에 날짜가 없으면 한 "
             "수집 사이트의 공고가 날짜 없이 길게 이어진 구간이어서 채운 날짜가 실제 게시일과 다를 수 있다. `n`은 공고 수, "
-            "`n_in_occ`는 그 가운데 분석 대상 세분류의 공고 수, `n_in_occ_in_period`는 다시 그 가운데 받은 날짜가 분석 "
-            "기간 안인 공고 수이다. 연도 안에서는 날짜를 받은 공고가 많은 수집 사이트부터 싣는다."),
+            "`n_in_occ`는 그 가운데 분석 대상 세분류의 공고 수, `n_in_occ_in_period`는 다시 그 가운데 채운 날짜가 분석 "
+            "기간 안인 공고 수이다. 연도 안에서는 날짜를 채운 공고가 많은 수집 사이트부터 싣는다."),
         "t02a_treated_by_period": (
             "대상: " + _ALIVE_NOTE + ". " + post_year + " `unit` = period는 설정의 기간(`period.groups`)이며 설정의 "
             "순서로 싣는다. `n_treated`와 `n_control`은 설정의 처치 정의(" + definition + ")로 나눈 처치 공고와 비교 "
@@ -1888,12 +1894,12 @@ def _table_notes(cfg: dict) -> dict[str, str]:
             "가운데 그 행 처치 공고의 비율이다. 이 표는 공고의 게시일을 마감일로 대신한 공고가 분석 표본과 처치 공고에서 "
             "차지하는 몫을 기간별로 보여 준다. 마감일은 실제 게시일보다 늦으므로 이 몫이 큰 기간은 기간 구분이 덜 정확하다."),
         "t02e_fill_gap_by_period": (
-            "대상: " + _ALIVE_NOTE + " 가운데 날짜를 받은 공고(`date_source` = `fill`). 설정의 기간(`period.groups`, "
+            "대상: " + _ALIVE_NOTE + " 가운데 날짜를 채운 공고(`date_source` = `fill`). 설정의 기간(`period.groups`, "
             "설정의 순서)과 앞뒤 날짜 간격의 구간(`gap_bin`)별 공고 수이며, 공고가 없는 조합도 0으로 싣는다. `n_treated`는 "
             "그 가운데 설정의 처치 정의(" + definition + ")로 나눈 처치 공고 수이고, `share_in_period`는 `n`을 그 기간에 "
-            "네 단계를 모두 통과한 공고의 수로 나눈 값이다. 이 표는 날짜를 받은 공고가 분석 표본에 얼마나 들어오고, "
+            "네 단계를 모두 통과한 공고의 수로 나눈 값이다. 이 표는 날짜를 채운 공고가 분석 표본에 얼마나 들어오고, "
             "그 날짜의 앞뒤 간격이 얼마나 긴지를 기간별로 보여 준다. 설정 `period.fill.max_gap_days`에 일수를 주면, "
-            "날짜를 받은 공고 가운데 간격이 그 일수보다 크거나 뒤에 날짜가 없는 공고(이 표에서 그 일수보다 위의 구간과 "
+            "날짜를 채운 공고 가운데 간격이 그 일수보다 크거나 뒤에 날짜가 없는 공고(이 표에서 그 일수보다 위의 구간과 "
             f"`{FILL_GAP_NONE}`)가 분석 기간 단계에서 빠진다(지금 설정: "
             + ("값 없음, 빼지 않음" if max_gap is None else f"{max_gap}일") + ")."),
         "t03a_skills_per_posting": (
