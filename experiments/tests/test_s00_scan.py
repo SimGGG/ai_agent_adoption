@@ -1,6 +1,10 @@
+import datetime as dt
 import importlib.util, pandas as pd, paths
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
+
+import synth
 from aabundle import rawio
 
 def load_script():
@@ -13,20 +17,25 @@ def test_scan_outputs(synth_data, tmp_path):
     long = pd.read_parquet(out["skills_long"]); occ = pd.read_parquet(out["occ_year_all"])
     stats = pd.read_parquet(out["scan_stats"]).set_index("year")
 
-    assert sorted(base.posting_id) == [f"p{i:02d}" for i in (1, 2, 3, 4, 5, 6, 9, 10, 11, 12)]
+    # 13: 과제 3에서 더한 마감일만 있는 공고. 날짜가 없는 p14는 분석 기간 단계에서 빠진다
+    # 15, 16: 과제 3A에서 더한 공고(생성형 AI 활용 키워드만 있는 공고, 본문에 Fulfillment가 있는 공고)
+    # 14, 17: infra-2b 과제 1에서 날짜를 채우는 설정(결정 38)이 기본값이 되어, 두 날짜가 모두 없는 p14와 p17이
+    # 앞 공고(p13, p16)의 날짜를 받아 남는다
+    assert sorted(base.posting_id) == [f"p{i:02d}" for i in (1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17)]
     assert sorted(treat.posting_id) == sorted(base.posting_id)
     assert set(long.posting_id) <= set(base.posting_id)
     assert base.set_index("posting_id").loc["p12", "n_skills"] == 2
     assert base.set_index("posting_id").loc["p10", "n_skills"] == 0
 
     o = occ.set_index("keco4")
-    assert o.loc["0262", "n"] == 5 and o.loc["0262", "n_use"] == 2       # p02, p04
+    assert o.loc["0262", "n"] == 7 and o.loc["0262", "n_use"] == 2       # p02, p04 (n: 과제 3에서 p14를 더해 5에서 6으로, 과제 3A에서 p15를 더해 7로 바꿨다)
     assert o.loc["1332", "n_use"] == 1 and o.loc["1332", "n_dev"] == 2   # p05 / p01, p05
     assert o.loc["9052", "n"] == 1 and o.loc["NA", "n"] == 1
-    assert stats.loc[2025, "n_raw"] == 12 and stats.loc[2025, "n_in_occ"] == 10
+    assert stats.loc[2025, "n_raw"] == 17 and stats.loc[2025, "n_in_occ"] == 15   # 과제 3: p13, p14를 더해 12, 10에서 14, 11로, 과제 3A: p15, p16을 더해 16, 13으로, 과제 4: p17을 더해 n_raw를 17로 바꿨다. infra-2b 과제 1: 날짜를 받은 p14, p17이 남아 n_in_occ를 15로 바꿨다
     assert stats.loc[2025, "n_unmatched"] == 1
 
-    kw = pd.read_parquet(out["kw_pattern_hits"]).set_index("pattern")
+    kw = pd.read_parquet(out["kw_pattern_hits"])
+    kw = kw[kw["dictionary"] != "use"].set_index("pattern")   # 과제 4에서 더한 생성형 AI 활용 사전의 행은 따로 시험한다
     assert len(kw) == len(synth_data["cfg"]["treatment"]["keywords"]["strict"]) + \
         len(synth_data["cfg"]["treatment"]["keywords"]["broad_extra"])
     assert kw.loc["Claude", "n"] == 1 and kw.loc["Claude", "dictionary"] == "broad_extra"   # p11
@@ -36,16 +45,21 @@ def test_scan_outputs(synth_data, tmp_path):
 # 시험 안에서만 아래 공고의 게시일과 근무지를 바꿔 쓴다. p02(분석 대상 직종, 생성형 AI 활용 숙련, 잡사이트B)와
 # p07(분석 대상 직종 아님, 잡사이트A)은 게시일이 없다. p05, p09, p11, p12는 base에 남고 근무지가 `기타`이다.
 # p07의 근무지도 `광산구`이지만 base에 없으므로 세지 않는다.
+# 과제 3에서 가상 자료에 게시일이 없는 공고 p13(마감일 있음, 잡사이트A), p14(날짜 없음, 잡사이트B)가 더해졌고,
+# 게시일이 없으면 마감일을 쓰므로(결정 25) 마감일이 있는 p02는 base에 남는다.
 MISSING_POST_START = {"p02": None, "p07": None}
 OTHER_REGIONS = {"p05": "광산구 어딘가", "p09": "광산구", "p11": "아시아·중동", "p12": "가" * 25, "p07": "광산구"}
 
 
-def rewrite_postings(synth_data, post_start=MISSING_POST_START, region=OTHER_REGIONS):
-    """2025년 가상 공고 파일에서 지정한 공고의 게시일과 근무지를 바꿔 다시 쓴다(시험 안에서만)."""
+def rewrite_postings(synth_data, post_start=MISSING_POST_START, region=OTHER_REGIONS, post_end=None, detail=None):
+    """2025년 가상 공고 파일에서 지정한 공고의 게시일, 근무지, 마감일, 본문을 바꿔 다시 쓴다(시험 안에서만).
+
+    `post_end`는 최종 검토 수정에서, `detail`은 infra-2b 과제 1에서 더했다. 주지 않으면 그 열은 바꾸지 않는다."""
     path = rawio.posting_path(synth_data["postings_dir"], 2025)
     t = pq.read_table(path)
     ids = t.column("posting_id").to_pylist()
-    for col, changes, typ in (("post_start", post_start, pa.date32()), ("region", region, pa.string())):
+    for col, changes, typ in (("post_start", post_start, pa.date32()), ("post_end", post_end or {}, pa.date32()),
+                              ("region", region, pa.string()), ("detail", detail or {}, pa.string())):
         values = [changes.get(i, v) for i, v in zip(ids, t.column(col).to_pylist())]
         t = t.set_column(t.schema.get_field_index(col), col, pa.array(values, typ))
     pq.write_table(t, path, row_group_size=5)
@@ -56,15 +70,36 @@ def test_scan_counts_postings_without_post_start_and_other_region_words(synth_da
     out = load_script().scan(synth_data["cfg"], synth_data["root"], tmp_path / "s0")
     stats = pd.read_parquet(out["scan_stats"]).set_index("year")
     m = pd.read_parquet(out["post_start_missing"])
-    assert list(m.columns) == ["year", "source", "n_raw", "n_no_post_start", "n_in_occ", "n_in_occ_no_post_start",
-                               "n_in_occ_use", "n_in_occ_use_no_post_start"]
+    # 과제 4: 게시일을 정할 수 없는 공고, 날짜로 쓸 수 없는 마감일, 마감일로 게시일을 정한 공고의 건수 열을 더했다
+    # infra-2b 과제 1: 날짜를 채운 공고의 건수 열 다섯 개를 끝에 더했다
+    assert list(m.columns) == ["year", "source", "n_raw", "n_no_post_start", "n_no_date", "n_end_unusable",
+                               "n_in_occ", "n_in_occ_no_post_start", "n_in_occ_no_date", "n_in_occ_end_unusable",
+                               "n_in_occ_from_end_in_period", "n_in_occ_use", "n_in_occ_use_no_post_start",
+                               "n_in_occ_use_no_date", "n_in_occ_use_from_end_in_period",
+                               "n_filled", "n_in_occ_filled", "n_in_occ_filled_in_period", "n_in_occ_fill_dates",
+                               "n_in_occ_use_filled_in_period"]
     assert (m.groupby("year")["n_raw"].sum() == stats["n_raw"]).all()
-    assert m["n_no_post_start"].sum() == len(MISSING_POST_START)
-    s = m.set_index("source")
-    assert s.loc["잡사이트B"].drop("year").tolist() == [4, 1, 3, 1, 2, 1]   # p02, p05, p08, p11
-    assert s.loc["잡사이트A"].drop("year").tolist() == [4, 1, 3, 0, 1, 0]   # p01, p04, p07, p10
-    assert m["n_in_occ"].sum() == 10 and m["n_in_occ_use"].sum() == 3       # 게시일과 관계없이 센다
-    assert "p02" not in set(pd.read_parquet(out["base"])["posting_id"])
+    assert m["n_no_post_start"].sum() == len(MISSING_POST_START) + synth.N_NO_POST_START   # + p13, p14, p17(과제 4)
+    s = m.set_index("source").drop(columns="year")
+    # 잡사이트B: p02, p05, p08, p11, p14, p17(과제 4). p02는 마감일로 게시일을 정하고, p17은 마감일이 9999-12-31.
+    # infra-2b 과제 1: p14와 p17은 앞 공고 p13(2025-12-20), p16(2025-09-01)의 날짜를 받는다(n_no_date는 받기 전의 수)
+    assert s.loc["잡사이트B"].to_dict() == {
+        "n_raw": 6, "n_no_post_start": 3, "n_no_date": 2, "n_end_unusable": 1,
+        "n_in_occ": 5, "n_in_occ_no_post_start": 3, "n_in_occ_no_date": 2, "n_in_occ_end_unusable": 1,
+        "n_in_occ_from_end_in_period": 1, "n_in_occ_use": 2, "n_in_occ_use_no_post_start": 1,
+        "n_in_occ_use_no_date": 0, "n_in_occ_use_from_end_in_period": 1,
+        "n_filled": 2, "n_in_occ_filled": 2, "n_in_occ_filled_in_period": 2, "n_in_occ_fill_dates": 2,
+        "n_in_occ_use_filled_in_period": 0}
+    # 잡사이트A: p01, p04, p07, p10, p13, p16(과제 3A). p13은 마감일로 게시일을 정한다
+    assert s.loc["잡사이트A"].to_dict() == {
+        "n_raw": 6, "n_no_post_start": 2, "n_no_date": 0, "n_end_unusable": 0,
+        "n_in_occ": 5, "n_in_occ_no_post_start": 1, "n_in_occ_no_date": 0, "n_in_occ_end_unusable": 0,
+        "n_in_occ_from_end_in_period": 1, "n_in_occ_use": 1, "n_in_occ_use_no_post_start": 0,
+        "n_in_occ_use_no_date": 0, "n_in_occ_use_from_end_in_period": 0,
+        "n_filled": 0, "n_in_occ_filled": 0, "n_in_occ_filled_in_period": 0, "n_in_occ_fill_dates": 0,
+        "n_in_occ_use_filled_in_period": 0}
+    assert m["n_in_occ"].sum() == 15 and m["n_in_occ_use"].sum() == 3       # 게시일과 관계없이 센다(과제 3A: p15, p16을 더해 12에서 14로, 과제 4: p17을 더해 15로 바꿨다)
+    assert "p02" in set(pd.read_parquet(out["base"])["posting_id"])          # 마감일이 있어 남는다(과제 3)
 
     w = pd.read_parquet(out["sido_other_words"])
     assert list(w.columns) == ["word", "n"]
@@ -80,3 +115,201 @@ def test_scan_never_stores_posting_text(synth_data, tmp_path):
         df = pd.read_parquet(p)
         assert "detail" not in df.columns and "title" not in df.columns
         assert not df.astype(str).apply(lambda c: c.str.contains("에이전트 개발")).any().any()
+
+
+# 과제 4에서 더한 시험. 가상 자료를 바꾸지 않고 1단계를 한 번 실행한 결과를 본다.
+@pytest.fixture
+def s00():
+    return load_script()
+
+
+@pytest.fixture
+def scan_out(s00, synth_data, tmp_path):
+    return s00.scan(synth_data["cfg"], synth_data["root"], tmp_path / "s0")
+
+
+def test_scan_counts_dates_taken_from_post_end(scan_out):
+    psm = pd.read_parquet(scan_out["post_start_missing"])
+    total = psm.drop(columns=["year", "source"]).sum()
+    # 가상 공고 ID_END_ONLY, ID_NO_DATE, ID_END_UNUSABLE(과제 4) / ID_NO_DATE, ID_END_UNUSABLE
+    assert total["n_no_post_start"] == synth.N_NO_POST_START and total["n_no_date"] == synth.N_NO_DATE
+    assert total["n_end_unusable"] == synth.N_END_UNUSABLE == 1 and total["n_in_occ_end_unusable"] == 1   # ID_END_UNUSABLE
+    assert total["n_in_occ_from_end_in_period"] == 1
+    assert total["n_in_occ_no_post_start"] - total["n_in_occ_no_date"] >= total["n_in_occ_from_end_in_period"]
+    base = pd.read_parquet(scan_out["base"]).set_index("posting_id")
+    # infra-2b 과제 1: 날짜를 채우는 설정이 기본값이 되어, 게시일을 정할 수 없던 ID_NO_DATE와 ID_END_UNUSABLE이
+    # 앞 공고의 날짜를 받아 남는다(바꾸기 전: 둘 다 base에 없고 date_source는 post_start, post_end 두 값)
+    assert synth.ID_END_ONLY in base.index
+    assert base.loc[[synth.ID_NO_DATE, synth.ID_END_UNUSABLE], "date_source"].tolist() == ["fill", "fill"]
+    assert set(base["date_source"]) == {"post_start", "post_end", "fill"} and base["period"].notna().all()
+
+
+def test_scan_writes_post_end_gap(scan_out, s00):
+    gap = pd.read_parquet(scan_out["post_end_gap"])
+    assert list(gap.columns) == ["year", "bin", "n"]
+    assert gap["bin"].nunique() == len(s00.POST_END_GAP_BINS)                 # 공고가 없는 구간도 0으로 있다
+    assert gap.loc[gap["bin"] == "8~30일", "n"].sum() >= 1                      # 가상 공고의 마감일은 게시일 30일 뒤
+    assert gap["n"].sum() == synth.N_IN_OCC_BOTH_DATES      # 분석 대상 세분류이고 두 날짜가 모두 있는 가상 공고 수
+
+
+def test_post_end_gap_is_empty_with_one_date_column(synth_data, tmp_path, s00):
+    synth_data["cfg"]["period"]["date_columns"] = ["post_start"]
+    out = s00.scan(synth_data["cfg"], synth_data["root"], tmp_path / "s0")
+    gap = pd.read_parquet(out["post_end_gap"])
+    assert list(gap.columns) == ["year", "bin", "n"] and gap.empty
+    psm = pd.read_parquet(out["post_start_missing"])
+    assert psm["n_end_unusable"].sum() == 0 and psm["n_in_occ_from_end_in_period"].sum() == 0
+
+
+def test_scan_stores_text_length(scan_out):
+    base = pd.read_parquet(scan_out["base"]).set_index("posting_id")
+    assert base["text_len"].dtype == "int64" and (base["text_len"] >= 0).all()
+    detail = {p[0]: p[4] for p in synth._POSTINGS}       # 설정의 본문 열은 detail 하나이다
+    assert base["text_len"].to_dict() == {i: len(detail[i] or "") for i in base.index}
+    assert base.loc["p06", "text_len"] == 0               # 본문이 없는 공고
+    # 본문 자체는 어느 결과에도 없다(test_scan_never_stores_posting_text는 새 열과 새 파일까지 모두 본다)
+    texts = [p[4] for p in synth._POSTINGS if p[4]]
+    for name in ("base", "treat", "skills_long"):
+        df = pd.read_parquet(scan_out[name]).astype(str)
+        for t in texts:
+            assert not df.apply(lambda c: c.str.contains(t, regex=False)).any().any()
+
+
+def test_scan_counts_use_dictionary_patterns(scan_out, synth_data):
+    kw = pd.read_parquet(scan_out["kw_pattern_hits"])
+    use = kw[kw["dictionary"] == "use"]
+    patterns = synth_data["cfg"]["treatment"]["keywords"]["use"]
+    assert use.groupby("year")["pattern"].apply(list).to_dict() == {y: patterns for y in synth_data["cfg"]["data"]["years"]}
+    by_pattern = use.groupby("pattern")["n"].sum()
+    assert by_pattern[r"Chat\s*GPT"] >= 1                                  # ID_USE_KEYWORD_ONLY
+    # `Claude`는 넓은 사전과 생성형 AI 활용 사전에 모두 있다. 사전마다 따로 센다(p11)
+    assert by_pattern["Claude"] == 1
+    assert kw.loc[(kw["dictionary"] == "broad_extra") & (kw["pattern"] == "Claude"), "n"].sum() == 1
+    treat = pd.read_parquet(scan_out["treat"])
+    assert by_pattern.max() <= treat["kw_use"].sum()                         # kw_use가 참인 공고 안에서만 센다
+
+
+# 아래는 최종 검토 수정에서 더한 시험이다.
+
+def test_fallback_date_outside_the_period_is_dropped_but_counted(synth_data, tmp_path, s00):
+    # 분석 기간을 2025~2026년으로 넓히고(기간 둘), 분석 대상 세분류(1332)의 두 공고에서 게시일을 지운다.
+    # p12는 마감일이 공고 파일의 연도(2025)와 다른 해이지만 분석 기간 안(2026-01-15)이어서 남고,
+    # p11은 마감일이 분석 기간 밖(2027-01-15)이어서 빠진다.
+    cfg = synth_data["cfg"]
+    cfg["period"]["end"] = "2026-12-31"
+    cfg["period"]["groups"] = [{"name": synth.PERIOD_NAME, "years": [2025]}, {"name": "가상 기간 2", "years": [2026]}]
+    rewrite_postings(synth_data, post_start={"p11": None, "p12": None}, region={},
+                     post_end={"p11": dt.date(2027, 1, 15), "p12": dt.date(2026, 1, 15)})
+    out = s00.scan(cfg, synth_data["root"], tmp_path / "s0")
+    base = pd.read_parquet(out["base"]).set_index("posting_id")
+    assert "p11" not in base.index
+    assert base.loc["p12", "date_source"] == "post_end" and base.loc["p12", "year"] == 2026
+    total = pd.read_parquet(out["post_start_missing"]).drop(columns=["year", "source"]).sum()
+    assert total["n_in_occ_no_post_start"] == 5        # p11, p12, ID_END_ONLY, ID_NO_DATE, ID_END_UNUSABLE
+    assert total["n_in_occ_no_date"] == 2              # ID_NO_DATE, ID_END_UNUSABLE
+    assert total["n_in_occ_from_end_in_period"] == 2   # p12, ID_END_ONLY
+    # 마감일로 정한 게시일이 분석 기간 밖인 공고(p11)가 있어 부등호가 등호가 아니다
+    assert total["n_in_occ_no_post_start"] - total["n_in_occ_no_date"] > total["n_in_occ_from_end_in_period"]
+
+
+def _add_date_column(synth_data, name: str, values: dict) -> None:
+    """2025년 가상 공고 파일에 날짜 열 하나를 더해 다시 쓴다. `values`는 {공고 번호: 날짜}이고 나머지는 결측이다."""
+    path = rawio.posting_path(synth_data["postings_dir"], 2025)
+    t = pq.read_table(path)
+    ids = t.column("posting_id").to_pylist()
+    t = t.append_column(name, pa.array([values.get(i) for i in ids], pa.date32()))
+    pq.write_table(t, path, row_group_size=5)
+
+
+def test_scan_reads_a_configured_date_column_outside_the_raw_columns(synth_data, tmp_path, s00):
+    # 게시일과 마감일이 모두 없는 ID_NO_DATE에만 셋째 날짜 열의 값을 준다
+    _add_date_column(synth_data, "post_alt", {synth.ID_NO_DATE: dt.date(2025, 6, 1)})
+    synth_data["cfg"]["period"]["date_columns"] = ["post_start", "post_end", "post_alt"]
+    out = s00.scan(synth_data["cfg"], synth_data["root"], tmp_path / "s0")
+    base = pd.read_parquet(out["base"]).set_index("posting_id")
+    assert base.loc[synth.ID_NO_DATE, "date_source"] == "post_alt" and base.loc[synth.ID_NO_DATE, "month"] == 6
+
+
+# 아래는 infra-2b 과제 1(결정 38: 두 날짜가 모두 없는 공고에 같은 파일의 앞 공고 날짜를 쓴다)에서 더한 시험이다.
+# 가상 공고 파일은 다섯 행씩 행 묶음으로 나뉜다(p01~p05, p06~p10, p11~p15, p16~p17). 아래처럼 바꾸면 날짜는
+# p01 없음(파일의 첫 행이어서 받을 날짜가 없다), p05 없음(앞의 p04 2025-04-11을 받고 뒤의 p06 2025-07-02까지 82일),
+# p08 2024-12-31(마감일, 분석 기간 밖), p09 없음(p08의 2024-12-31을 받아 분석 기간 밖, 뒤의 p10 2025-10-02까지 275일),
+# p11 없음(앞 행 묶음의 p10 2025-10-02를 받고 뒤의 p12 2025-11-02까지 31일)이다. 원래 날짜가 없는 p14는 p13의
+# 2025-12-20을 받고 뒤의 p15 2025-08-01까지 141일이다. 수정 2차에서 p16의 게시일을 2025-12-20으로 바꿔, p17이 p14와
+# 같은 날짜(2025-12-20)를 다른 행 묶음에서 받게 했다(뒤에 날짜가 없다). p14, p17은 둘 다 잡사이트B이므로, 행 묶음마다
+# 서로 다른 날짜를 센 뒤 더하면 잡사이트B의 `n_in_occ_fill_dates`가 4가 되고, 파일 전체에서 세면 3이다.
+FILL_POST_START = {"p01": None, "p05": None, "p08": None, "p09": None, "p11": None, "p16": dt.date(2025, 12, 20)}
+FILL_POST_END = {"p01": None, "p05": None, "p08": dt.date(2024, 12, 31), "p09": None, "p11": None}
+
+
+def _fill_scan(synth_data, tmp_path, s00, enabled=True):
+    rewrite_postings(synth_data, post_start=FILL_POST_START, region={}, post_end=FILL_POST_END)
+    synth_data["cfg"]["period"]["fill"]["enabled"] = enabled
+    return s00.scan(synth_data["cfg"], synth_data["root"], tmp_path / "s0")
+
+
+def test_scan_fills_dates_across_row_groups(synth_data, tmp_path, s00):
+    assert pq.ParquetFile(rawio.posting_path(synth_data["postings_dir"], 2025)).metadata.num_row_groups == 4
+    out = _fill_scan(synth_data, tmp_path, s00)
+    base = pd.read_parquet(out["base"]).set_index("posting_id")
+    assert "p01" not in base.index and "p09" not in base.index      # 받을 날짜가 없음 / 받은 날짜가 분석 기간 밖
+    filled = base[base["date_source"] == "fill"]
+    assert filled.index.tolist() == ["p05", "p11", "p14", "p17"]
+    # 수정 2차: p17의 달을 9에서 12로 바꿨다(p16의 게시일을 바꿨다)
+    assert filled["year"].tolist() == [2025] * 4 and filled["month"].tolist() == [4, 10, 12, 12]
+    assert filled.loc["p14", "date_source"] == filled.loc["p17", "date_source"] == "fill"
+    assert filled["fill_gap_days"].iloc[:3].tolist() == [82, 31, 141] and pd.isna(filled["fill_gap_days"].iloc[3])
+    assert base.loc[base["date_source"] != "fill", "fill_gap_days"].isna().all()
+    assert base.loc["p13", "date_source"] == "post_end"
+
+    m = pd.read_parquet(out["post_start_missing"]).set_index("source")
+    new = ["n_no_date", "n_filled", "n_in_occ_filled", "n_in_occ_filled_in_period", "n_in_occ_fill_dates",
+           "n_in_occ_use_filled_in_period"]
+    assert m.loc["잡사이트A", new].tolist() == [1, 0, 0, 0, 0, 0]        # p01
+    # p05(생성형 AI 활용 숙련), p11, p14, p17. 채운 날짜는 04-11, 10-02, 12-20(p14와 p17, 행 묶음 2와 3)의 세 가지이다
+    # (수정 2차에서 4에서 3으로 바꿨다. 행 묶음마다 센 값을 더하면 1 + 2 + 1 = 4가 되어 이 단언에 걸린다)
+    assert m.loc["잡사이트B", new].tolist() == [4, 4, 4, 4, 3, 1]
+    assert m.loc["잡사이트C", new].tolist() == [1, 1, 1, 0, 1, 0]        # p09
+    assert m["n_filled"].sum() == 5 <= m["n_no_date"].sum() == 6        # 차이는 파일의 첫 행 p01
+
+    fill = pd.read_parquet(out["date_fill"])
+    assert list(fill.columns) == ["year", "source", "gap_bin", "n", "n_in_occ", "n_in_occ_in_period"]
+    assert fill.values.tolist() == [
+        [2025, "잡사이트B", "31~90일", 2, 2, 2],          # p05, p11
+        [2025, "잡사이트B", "91~365일", 1, 1, 1],         # p14
+        [2025, "잡사이트B", "뒤 날짜 없음", 1, 1, 1],      # p17
+        [2025, "잡사이트C", "91~365일", 1, 1, 0],         # p09(받은 날짜가 분석 기간 밖)
+    ]
+
+
+def test_scan_without_fill_leaves_undated_postings_out(synth_data, tmp_path, s00):
+    stale = tmp_path / "s0" / "date_fill.parquet"
+    stale.parent.mkdir(parents=True)
+    pd.DataFrame({"old": [1]}).to_parquet(stale)                       # 앞선 실행의 파일은 지운다
+    out = _fill_scan(synth_data, tmp_path, s00, enabled=False)
+    assert "date_fill" not in out and not stale.exists()
+    base = pd.read_parquet(out["base"]).set_index("posting_id")
+    assert not {"p01", "p05", "p09", "p11", "p14", "p17"} & set(base.index)
+    assert set(base["date_source"]) == {"post_start", "post_end"} and base["fill_gap_days"].isna().all()
+    m = pd.read_parquet(out["post_start_missing"])
+    assert m["n_no_date"].sum() == 6
+    assert (m[["n_filled", "n_in_occ_filled", "n_in_occ_filled_in_period", "n_in_occ_fill_dates",
+               "n_in_occ_use_filled_in_period"]] == 0).all().all()
+
+
+def test_scan_stops_when_date_rows_and_row_groups_differ(synth_data, tmp_path, s00, monkeypatch):
+    real = s00._file_fill
+    monkeypatch.setattr(s00, "_file_fill", lambda pf, cols: real(pf, cols).iloc[:-1])
+    with pytest.raises(RuntimeError, match="행 수"):
+        s00.scan(synth_data["cfg"], synth_data["root"], tmp_path / "s0")
+    assert not any((tmp_path / "s0").glob("*.parquet"))
+    monkeypatch.setattr(s00, "_file_fill", lambda pf, cols: pd.concat([real(pf, cols)] * 2, ignore_index=True))
+    with pytest.raises(RuntimeError, match="행 수"):
+        s00.scan(synth_data["cfg"], synth_data["root"], tmp_path / "s0")
+
+
+def test_scan_names_a_missing_date_column_before_reading(synth_data, tmp_path, s00):
+    synth_data["cfg"]["period"]["date_columns"] = ["post_start", "post_end", "post_alt"]
+    with pytest.raises(KeyError, match=r"없는 열: \['post_alt'\]"):
+        s00.scan(synth_data["cfg"], synth_data["root"], tmp_path / "s0")
+    assert not (tmp_path / "s0").exists()      # 훑기 전에 멈춰 결과 폴더도 만들지 않는다

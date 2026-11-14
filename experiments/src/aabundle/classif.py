@@ -63,14 +63,17 @@ def normalize_ksic(s: pd.Series) -> pd.Series:
     return digits5.fillna(letter5).fillna(digits4)
 
 
-def ksic_sub(s: pd.Series, valid: set[str]) -> pd.Series:
+def ksic_sub(s: pd.Series, valid: set[str], not_in_table: str = "category") -> pd.Series:
     """산업 코드의 소분류 3자리를 돌려준다.
 
-    분류표(valid)에 없는 소분류는 KSIC_NOT_IN_TABLE로, 원래 결측이거나
-    변환할 수 없는 코드는 결측으로 둔다.
+    분류표(valid)에 없는 소분류는 `not_in_table`이 `"category"`이면 KSIC_NOT_IN_TABLE로,
+    `"missing"`이면 결측으로 둔다(설계 문서 결정 28). 원래 결측이거나 변환할 수 없는 코드는 결측으로 둔다.
     """
+    if not_in_table not in ("category", "missing"):
+        raise ValueError(f"not_in_table은 'category'나 'missing'이어야 합니다: {not_in_table!r}")
     sub = normalize_ksic(s).str[:3]
-    return sub.where(sub.isna() | sub.isin(valid), KSIC_NOT_IN_TABLE)
+    in_table = sub.isna() | sub.isin(valid)
+    return sub.where(in_table, KSIC_NOT_IN_TABLE if not_in_table == "category" else pd.NA)
 
 
 def keco_mid(s: pd.Series) -> pd.Series:
