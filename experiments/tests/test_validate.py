@@ -78,17 +78,18 @@ _BAD = [
 
 def test_use_keywords_shipped():
     kw = paths.load_config()["treatment"]["keywords"]["use"]
-    assert len(kw) == 71 and len(set(kw)) == 71          # 결정 41에서 34에서 71로 바꿨다
+    assert len(kw) == 70 and len(set(kw)) == 70          # 결정 41에서 34에서 71로 바꿨고, 결정 44에서 `에이닷`을 빼 70이다
     joined = re.compile("|".join(kw), re.IGNORECASE)
     for hit in ["ChatGPT 활용 경험", "챗GPT", "생성형 AI 툴", "프롬프트 엔지니어링", "LLM 기반", "LLMs", "AI 활용 능력", "GenAI",
                 # 결정 41에서 더한 표현
                 "클로드 활용", "Codex 사용 경험", "코덱스", "나노바나나", "sLLM 구축", "Grok", "DALL-E", "Veo 3", "클링 AI",
-                "Cursor AI", "에이닷", "NotebookLM", "Llama 3", "DeepSeek"]:
+                "Cursor AI", "NotebookLM", "Llama 3", "DeepSeek"]:
         assert joined.search(hit), hit
     for miss in ["Fulfillment 센터 운영", "풀필먼트", "명령 프롬프트", "KAI 활용", "달리 정한 바",
                  # 결정 41에서 더한 표현이 다른 뜻의 낱말에 걸리지 않는지
                  "ngrok 터널", "리사이클링 AI 기술", "필수노하우", "CODEX 규격", "코덱스 기준", "windsurfing", "LlamaIndex",
-                 "런웨이 패션쇼", "cursor 위치", "에이닷컴", "gamma 보정"]:
+                 "런웨이 패션쇼", "cursor 위치", "에이닷컴", "gamma 보정",
+                 "에이닷 서비스 운영"]:                      # 결정 44에서 뺀 표현
         assert not joined.search(miss), miss
 
 
